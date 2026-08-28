@@ -1,0 +1,7 @@
+# GAME4ALL batch pack example — listing rows, not logins
+Valorant | Immortal 3 | 87 skins Reaver RGX | EU | cost:22 | sell:39.9 | platform:G2G
+Fortnite | Unreal | 200 skins 40 emotes | NA | cost=18 | sell=34 | platform:Eldorado
+League of Legends | Diamond | 80 skins | EU | cost 16 | sell 29
+GTA V | Rank Ready | cash + properties | NA | cost:12 | sell:24.5 | platform:EpicNPC
+FC 25 | Gold | Ultimate Team meta | EU | cost:9 | sell:18.9
+CS2 | Gold Nova | 10 skins AK redline | EU | cost:8 | sell:16.5
