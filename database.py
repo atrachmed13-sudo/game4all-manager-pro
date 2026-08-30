@@ -1,8 +1,7 @@
 """SQLite inventory, sales, settings, and license store for GAME4ALL Manager Pro.
 
-Listings are product rows (title, game, features, prices, status).
-Login secrets are not part of the schema. License keys live in ``licenses``;
-the workstation activation is persisted in ``settings``.
+Listings are product rows (title, game, features, prices, delivery logins).
+License keys live in ``licenses``; workstation activation is persisted in ``settings``.
 """
 
 from __future__ import annotations
@@ -34,6 +33,8 @@ INVENTORY_COLUMNS = [
     "list_price",
     "platform",
     "status",
+    "login_email",
+    "login_password",
     "notes",
     "created_at",
     "updated_at",
@@ -109,12 +110,19 @@ def init_db() -> None:
                 list_price REAL NOT NULL DEFAULT 0,
                 platform TEXT NOT NULL DEFAULT 'G2G',
                 status TEXT NOT NULL DEFAULT 'Available',
+                login_email TEXT NOT NULL DEFAULT '',
+                login_password TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
+        if "login_email" not in existing:
+            conn.execute("ALTER TABLE inventory ADD COLUMN login_email TEXT NOT NULL DEFAULT ''")
+        if "login_password" not in existing:
+            conn.execute("ALTER TABLE inventory ADD COLUMN login_password TEXT NOT NULL DEFAULT ''")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sales (
@@ -221,6 +229,22 @@ def list_games() -> list[str]:
     return [row["game"] for row in rows]
 
 
+def list_delivery_accounts() -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, sku, title, game, platform, status, login_email, login_password
+            FROM inventory
+            ORDER BY CASE status
+                WHEN 'Sold' THEN 0
+                WHEN 'Listed' THEN 1
+                ELSE 2
+            END, id DESC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def get_item(item_id: int) -> dict[str, Any] | None:
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM inventory WHERE id = ?", (item_id,)).fetchone()
@@ -244,8 +268,9 @@ def insert_listings(rows: list[dict[str, Any]], pack_id: str) -> int:
                 """
                 INSERT INTO inventory (
                     pack_id, sku, title, game, rank, level, skins, emotes, extras,
-                    server, cost, list_price, platform, status, notes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    server, cost, list_price, platform, status, login_email, login_password,
+                    notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pack_id,
@@ -262,6 +287,8 @@ def insert_listings(rows: list[dict[str, Any]], pack_id: str) -> int:
                     list_price,
                     platform,
                     str(raw.get("status") or "Available").strip() or "Available",
+                    str(raw.get("login_email") or "").strip(),
+                    str(raw.get("login_password") or "").strip(),
                     str(raw.get("notes") or "").strip(),
                     now,
                     now,
@@ -289,6 +316,8 @@ def update_inventory_row(item_id: int, fields: dict[str, Any]) -> None:
         "platform",
         "status",
         "notes",
+        "login_email",
+        "login_password",
     }
     assignments = []
     values: list[Any] = []

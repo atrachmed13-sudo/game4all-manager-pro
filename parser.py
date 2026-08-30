@@ -1,8 +1,7 @@
 """Batch listing parser and marketplace sales-copy generator.
 
-Reads TXT/CSV inventory packs (game, rank, skins, prices).
-Lines that look like email:password logins are skipped — this module
-does not authenticate to any game or marketplace.
+Reads TXT/CSV inventory packs (game, rank, skins, prices, email, password).
+email:password combo lines are imported as stock logins for delivery, not checked online.
 """
 
 from __future__ import annotations
@@ -14,9 +13,14 @@ from typing import Any
 
 from pricing import PLATFORMS, get_platform_profile
 
-# email:password (and close variants) — never imported as stock.
+# email:password (and close variants) — imported as delivery logins, never authenticated here.
+# Password stops at whitespace / | / ; / / so listing fields after a combo stay separate.
+COMBO_IN_TEXT = re.compile(
+    r"([^\s@]+@[^\s@]+\.[A-Za-z0-9.-]+)[:|;/\t]([^\s|;/]+)",
+    re.IGNORECASE,
+)
 CREDENTIAL_LINE = re.compile(
-    r"^\s*[^\s@]+@[^\s@]+\.[^\s@:|;]+(?:[:|;/\t]\S+)",
+    rf"^\s*{COMBO_IN_TEXT.pattern}",
     re.IGNORECASE,
 )
 
@@ -35,6 +39,9 @@ COLUMN_ALIASES = {
     "platform": {"platform", "marketplace", "market", "site"},
     "status": {"status", "state", "stock"},
     "notes": {"notes", "note", "desc", "description", "raw"},
+    "login_email": {"email", "mail", "e_mail", "login_email", "user", "username", "login", "account_email"},
+    "login_password": {"password", "pass", "passwd", "pwd", "pass_word", "login_password", "account_password"},
+    "combo": {"combo", "login_combo", "ep", "userpass", "email_password"},
 }
 
 GAMES = (
@@ -123,6 +130,7 @@ COPY_PACKS = {
             "G2G": "INSTANT DELIVERY • TRUSTED SELLER",
             "Eldorado": "FAST DELIVERY • FULL ACCESS",
             "PlayerAuctions": "READY TO PLAY • WARRANTY INCLUDED",
+            "FanPay": "SECURE PAYOUT • FAST HANDOFF",
             "PlayHub (PlayOkay)": "QUICK HANDOFF • CLEAN LISTING",
             "EpicNPC": "SERIOUS SELLER • INSTANT INFO",
             "U7BUY": "FAST DELIVERY • CLEAN ACCOUNT",
@@ -145,6 +153,7 @@ COPY_PACKS = {
             "G2G": "LIVRAISON INSTANTANÉE • VENDEUR FIABLE",
             "Eldorado": "LIVRAISON RAPIDE • FULL ACCESS",
             "PlayerAuctions": "PRÊT À JOUER • GARANTIE INCLUSE",
+            "FanPay": "PAIEMENT SÉCURISÉ • REMISE RAPIDE",
             "PlayHub (PlayOkay)": "REMISE RAPIDE • ANNONCE PROPRE",
             "EpicNPC": "VENDEUR SÉRIEUX • INFOS IMMÉDIATES",
             "U7BUY": "LIVRAISON RAPIDE • COMPTE CLEAN",
@@ -167,6 +176,7 @@ COPY_PACKS = {
             "G2G": "تسليم فوري • بائع موثوق",
             "Eldorado": "تسليم سريع • Full Access",
             "PlayerAuctions": "جاهز للعب • ضمان مضمّن",
+            "FanPay": "دفع آمن • تسليم سريع",
             "PlayHub (PlayOkay)": "تسليم سريع • إعلان نظيف",
             "EpicNPC": "بائع جاد • معلومات فورية",
             "U7BUY": "تسليم سريع • حساب نظيف",
@@ -192,8 +202,22 @@ def _norm(value: Any) -> str:
 
 
 def is_credential_line(text: str) -> bool:
-    """True when a line looks like an email:password combo rather than a listing."""
-    return bool(CREDENTIAL_LINE.match(text or ""))
+    """True when a line looks like an email:password combo."""
+    return bool(split_login_combo(text or "")[0])
+
+
+def split_login_combo(text: str) -> tuple[str, str]:
+    """Return (email, password) from a combo anywhere in the text, or empty strings."""
+    match = COMBO_IN_TEXT.search(text or "")
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    raw = _norm(text)
+    if not raw:
+        return "", ""
+    parts = re.split(r"[:|;/\t]", raw, maxsplit=1)
+    if len(parts) == 2 and "@" in parts[0]:
+        return parts[0].strip(), parts[1].strip()
+    return "", ""
 
 
 def _map_header(header: str) -> str | None:
@@ -231,6 +255,8 @@ def _blank_listing() -> dict[str, Any]:
         "platform": "G2G",
         "status": "Available",
         "notes": "",
+        "login_email": "",
+        "login_password": "",
     }
 
 
@@ -319,9 +345,34 @@ def extract_features(text: str, seed: dict[str, Any] | None = None) -> dict[str,
     }
 
 
+def _apply_login_fields(item: dict[str, Any], source: str = "") -> dict[str, Any]:
+    combo = _norm(item.pop("combo", "") if "combo" in item else "")
+    email = _norm(item.get("login_email"))
+    password = _norm(item.get("login_password"))
+    if combo and (not email or not password):
+        combo_email, combo_password = split_login_combo(combo)
+        email = email or combo_email
+        password = password or combo_password
+    if (not email or not password) and source:
+        src_email, src_password = split_login_combo(source)
+        email = email or src_email
+        password = password or src_password
+    if (not email or not password) and _norm(item.get("notes")):
+        note_email, note_password = split_login_combo(_norm(item.get("notes")))
+        email = email or note_email
+        password = password or note_password
+    item["login_email"] = email
+    item["login_password"] = password
+    if email and not _norm(item.get("title")):
+        item["title"] = email
+    return item
+
+
 def _finalize_listing(row: dict[str, Any]) -> dict[str, Any]:
     item = _blank_listing()
-    item.update({k: row.get(k, item[k]) for k in item})
+    item.update({k: row.get(k, item[k]) for k in item if k in row or k in item})
+    if "combo" in row:
+        item["combo"] = row.get("combo")
     item["cost"] = _money(item["cost"])
     item["list_price"] = _money(item["list_price"])
     platform = _norm(item["platform"])
@@ -332,13 +383,14 @@ def _finalize_listing(row: dict[str, Any]) -> dict[str, Any]:
     for key in ("title", "game", "rank", "level", "skins", "emotes", "server", "extras"):
         if not _norm(item.get(key)):
             item[key] = features.get(key) or ""
+    item = _apply_login_fields(item, _norm(item.get("notes")))
     if not item["title"]:
-        item["title"] = item["game"] or "GAME4ALL listing"
+        item["title"] = item["game"] or item["login_email"] or "GAME4ALL listing"
     return item
 
 
 def _parse_csv(text: str) -> tuple[list[dict[str, Any]], int]:
-    skipped = 0
+    imported = 0
     sample = text.lstrip()[:2048]
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
@@ -350,10 +402,6 @@ def _parse_csv(text: str) -> tuple[list[dict[str, Any]], int]:
     mapping = {src: _map_header(src) for src in reader.fieldnames}
     rows: list[dict[str, Any]] = []
     for raw in reader:
-        line = " ".join(str(v) for v in raw.values() if v)
-        if is_credential_line(line):
-            skipped += 1
-            continue
         mapped: dict[str, Any] = _blank_listing()
         notes_bits = []
         for src, value in raw.items():
@@ -365,18 +413,34 @@ def _parse_csv(text: str) -> tuple[list[dict[str, Any]], int]:
         if notes_bits:
             mapped["notes"] = " | ".join(part for part in (mapped.get("notes"), *notes_bits) if part)
         item = _finalize_listing(mapped)
-        if item["game"] or item["title"]:
+        if item["login_email"] and item["login_password"]:
+            imported += 1
+        if item["game"] or item["title"] or item["login_email"]:
             rows.append(item)
-    return rows, skipped
+    return rows, imported
 
 
 def _parse_pipe_line(line: str) -> dict[str, Any]:
-    parts = [part.strip() for part in re.split(r"[|/;]+", line) if part.strip()]
     mapped = _blank_listing()
     mapped["notes"] = line
+    email, password = split_login_combo(line)
+    line_for_parts = line
+    if email and password:
+        mapped["login_email"] = email
+        mapped["login_password"] = password
+        line_for_parts = COMBO_IN_TEXT.sub(" ", line, count=1)
+    parts = [part.strip() for part in re.split(r"[|/;]+", line_for_parts) if part.strip()]
     leftover = []
     for part in parts:
-        kv = re.match(r"^(cost|buy|sell|price|lvl|level|rank|game|server|skins|emotes|platform)\s*[=:]\s*(.+)$", part, re.IGNORECASE)
+        email, password = split_login_combo(part)
+        if email and password:
+            mapped["login_email"] = mapped["login_email"] or email
+            mapped["login_password"] = mapped["login_password"] or password
+            continue
+        kv = re.match(r"^(cost|buy|sell|price|lvl|level|rank|game|server|skins|emotes|platform|email|password|combo)\s*[=:]\s*(.+)$", part, re.IGNORECASE)
+        if not kv:
+            # "cost 16" / "sell 29" — space separator is only safe when the value is a number.
+            kv = re.match(r"^(cost|buy|sell|price|lvl|level)\s+([\d.,]+)$", part, re.IGNORECASE)
         if kv:
             key = kv.group(1).lower()
             val = kv.group(2).strip()
@@ -398,6 +462,12 @@ def _parse_pipe_line(line: str) -> dict[str, Any]:
                 mapped["emotes"] = val
             elif key == "platform":
                 mapped["platform"] = val
+            elif key == "email":
+                mapped["login_email"] = val
+            elif key == "password":
+                mapped["login_password"] = val
+            elif key == "combo":
+                mapped["combo"] = val
             continue
         leftover.append(part)
     if leftover:
@@ -406,31 +476,35 @@ def _parse_pipe_line(line: str) -> dict[str, Any]:
     return _finalize_listing(mapped)
 
 
+def _is_noise_line(line: str) -> bool:
+    stripped = line.strip()
+    return not stripped or stripped.startswith("#")
+
+
 def parse_batch_text(text: str, filename: str = "") -> dict[str, Any]:
-    """Parse uploaded pack contents into listing dicts."""
+    """Parse uploaded pack contents into listing dicts, including login combos."""
     payload = (text or "").replace("\ufeff", "").strip()
-    skipped = 0
-    kept_lines = []
-    for line in payload.splitlines():
-        if not line.strip() or line.strip().startswith("#"):
-            continue
-        if is_credential_line(line):
-            skipped += 1
-            continue
-        kept_lines.append(line)
-    cleaned = "\n".join(kept_lines).strip()
+    body_lines = [line for line in payload.splitlines() if not _is_noise_line(line)]
+    body = "\n".join(body_lines)
+    header = body_lines[0] if body_lines else ""
+    # A header only counts as CSV when several of its comma fields are real column names,
+    # so prose or a combo line with a stray comma is never mistaken for a CSV header.
+    header_fields = [part for part in header.split(",") if part.strip()]
+    mapped_fields = sum(1 for part in header_fields if _map_header(part) is not None)
+    looks_csv = filename.lower().endswith(".csv") or (len(header_fields) >= 2 and mapped_fields >= 2)
+    imported = 0
     rows: list[dict[str, Any]] = []
-    lower_name = filename.lower()
-    looks_csv = lower_name.endswith(".csv") or ("," in cleaned.split("\n", 1)[0] and _map_header(cleaned.split("\n", 1)[0].split(",")[0]) is not None)
-    if cleaned and (looks_csv or (cleaned.split("\n", 1)[0].count(",") >= 2 and re.search(r"game|title|rank|skins", cleaned.split("\n", 1)[0], re.I))):
-        rows, extra_skip = _parse_csv(cleaned)
-        skipped += extra_skip
-    if not rows and cleaned:
-        for line in kept_lines:
+    if looks_csv and body:
+        rows, imported = _parse_csv(body)
+    if not rows:
+        # Every TXT line goes through the same parser: the combo becomes the delivery login
+        # and the remaining pipe fields still fill game / rank / prices.
+        for line in body_lines:
             item = _parse_pipe_line(line)
-            if item["game"] or item["title"]:
+            if item["game"] or item["title"] or item["login_email"]:
                 rows.append(item)
-    return {"rows": rows, "skipped_credentials": skipped, "filename": filename}
+    imported = sum(1 for row in rows if _norm(row.get("login_email")) and _norm(row.get("login_password")))
+    return {"rows": rows, "imported_logins": imported, "filename": filename}
 
 
 def feature_cards(features: dict[str, str]) -> list[dict[str, str]]:
@@ -523,6 +597,73 @@ def generate_sales_copy(
         "bbcode": bbcode,
         "primary": primary,
         "format": preferred,
+        "platform": market,
+        "lang": lang_key,
+    }
+
+
+LISTING_PLATFORMS = ("G2G", "Eldorado", "PlayerAuctions", "FanPay")
+DELIVERY_KEYS = ("instant", "manual", "fast_1h", "hours_12", "hours_24")
+
+
+def generate_marketplace_listing(
+    *,
+    game: str,
+    rank: str = "",
+    delivery_label: str = "",
+    extras: str = "",
+    platform: str = "G2G",
+    lang: str = "en",
+) -> dict[str, str]:
+    """Build a marketplace title and paste-ready description for G2G-style shops."""
+    lang_key = lang if lang in COPY_PACKS else "en"
+    pack = COPY_PACKS[lang_key]
+    market = platform if platform in LISTING_PLATFORMS else "G2G"
+    game_name = _norm(game) or "Premium Game Account"
+    rank_name = _norm(rank) or pack["rank_fallback"]
+    extras_text = _norm(extras) or EMAIL_LABELS["full_access"][lang_key]
+    delivery = _norm(delivery_label) or pack["hook"].get(market, pack["hook"]["G2G"]).split("•")[0].strip()
+    hook = pack["hook"].get(market) or pack["hook"]["G2G"]
+    feature_bit = extras_text.split(",")[0].strip()[:42] or "Full Access"
+
+    if market == "G2G":
+        title = f"{game_name} {rank_name} | {delivery} | {feature_bit}"
+    elif market == "Eldorado":
+        title = f"{game_name} {rank_name} Account — {feature_bit} — {delivery}"
+    elif market == "FanPay":
+        title = f"{game_name} | {rank_name} | {feature_bit} | GAME4ALL"
+    else:
+        title = f"{game_name} {rank_name} — {delivery} — Ready to Play"
+
+    title = re.sub(r"\s+", " ", title).strip()[:120]
+
+    labels = {
+        "en": ("Game", "Rank / level", "Delivery", "Features", "Email access", "Warranty"),
+        "fr": ("Jeu", "Rang / niveau", "Livraison", "Extras", "Accès e-mail", "Garantie"),
+        "ar": ("اللعبة", "الرانك / المستوى", "التسليم", "المميزات", "وصول الإيميل", "الضمان"),
+    }
+    named = labels.get(lang_key, labels["en"])
+    labeled = list(zip(named, (game_name, rank_name, delivery, extras_text, EMAIL_LABELS["full_access"][lang_key], pack["warranty_text"].format(hours=12))))
+
+    intro = pack["intro"].format(title=f"{game_name} {rank_name}", platform=market)
+    html_lines = [
+        f"<h3>{hook}</h3>",
+        f"<p>{intro}</p>",
+        "<ul>",
+    ]
+    for label, value in labeled:
+        html_lines.append(f"  <li><strong>{label}:</strong> {value}</li>")
+    html_lines.extend(["</ul>", f"<p>{pack['footer']}</p>"])
+
+    plain_lines = [hook, "", intro.replace("<strong>", "").replace("</strong>", ""), ""]
+    for label, value in labeled:
+        plain_lines.append(f"• {label}: {value}")
+    plain_lines.extend(["", pack["footer"], "", "GAME4ALL Accounts Store — Trust, Security, Speed"])
+    description = "\n".join(plain_lines)
+    return {
+        "title": title,
+        "description": description,
+        "html": "\n".join(html_lines),
         "platform": market,
         "lang": lang_key,
     }

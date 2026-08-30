@@ -19,17 +19,13 @@ import alerts
 import database as db
 import i18n as i18n_mod
 import license as license_mod
+import parser as parser_mod
 import pricing as pricing_mod
-from parser import (
-    extract_features,
-    feature_cards,
-    generate_sales_copy,
-    parse_batch_text,
-)
 
 db = importlib.reload(db)
 i18n_mod = importlib.reload(i18n_mod)
 license_mod = importlib.reload(license_mod)
+parser_mod = importlib.reload(parser_mod)
 pricing_mod = importlib.reload(pricing_mod)
 LANGUAGE_LABELS = i18n_mod.LANGUAGE_LABELS
 LANGUAGES = i18n_mod.LANGUAGES
@@ -43,11 +39,74 @@ get_platform_profile = pricing_mod.get_platform_profile
 pricing_grid = pricing_mod.pricing_grid
 required_sell_price = pricing_mod.required_sell_price
 suggested_list_price = pricing_mod.suggested_list_price
+DELIVERY_KEYS = parser_mod.DELIVERY_KEYS
+LISTING_PLATFORMS = parser_mod.LISTING_PLATFORMS
+extract_features = parser_mod.extract_features
+feature_cards = parser_mod.feature_cards
+generate_marketplace_listing = parser_mod.generate_marketplace_listing
+generate_sales_copy = parser_mod.generate_sales_copy
+parse_batch_text = parser_mod.parse_batch_text
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 
 THEMES = ("royal", "cyber", "dark")
+NAV_INVENTORY = "Inventory & Packs"
+NAV_PARSER = "Parser & Descriptions"
+NAV_PRICING = "Pricing & Profit"
+NAV_SALES = "Sales & Analytics"
+CUSTOMERS_NAV_LABEL = "⭐ Customer Ratings & Delivery"
+DESK_NAV = (
+    ("inventory", "nav_inventory"),
+    ("parser", "nav_parser"),
+    ("pricing", "nav_pricing"),
+    ("sales", "nav_sales"),
+    ("customers", CUSTOMERS_NAV_LABEL),
+    ("listing", "nav_listing"),
+    ("license", "nav_license"),
+)
+PRIMARY_NAV = ("inventory", "parser", "pricing", "sales", "customers")
+MAIN_NAV_OPTIONS = (
+    NAV_INVENTORY,
+    NAV_PARSER,
+    NAV_PRICING,
+    NAV_SALES,
+    CUSTOMERS_NAV_LABEL,
+)
+MAIN_NAV_PAGE = {
+    NAV_INVENTORY: "inventory",
+    NAV_PARSER: "parser",
+    NAV_PRICING: "pricing",
+    NAV_SALES: "sales",
+    CUSTOMERS_NAV_LABEL: "customers",
+    "inventory": "inventory",
+    "parser": "parser",
+    "pricing": "pricing",
+    "sales": "sales",
+    "customers": "customers",
+}
+NAV_I18N = {
+    "license": "nav_license",
+    "listing": "nav_listing",
+    "inventory": "nav_inventory",
+    "parser": "nav_parser",
+    "pricing": "nav_pricing",
+    "sales": "nav_sales",
+}
+DELIVERY_I18N = {
+    "instant": "delivery_instant",
+    "manual": "delivery_manual",
+    "fast_1h": "delivery_1h",
+    "hours_12": "delivery_12h",
+    "hours_24": "delivery_24h",
+}
+CRM_PLATFORMS = ("G2G", "Eldorado", "PlayerAuctions", "FanPay")
+ORDER_STATUSES = (
+    "تم التسليم (في انتظار التقييم)",
+    "تم التقييم بنجاح ⭐",
+    "يحتاج متابعة/مشكلة",
+)
+OTHER_TOOL_PAGES = ("listing", "inventory", "parser", "pricing", "sales", "license")
 THEME_LABEL_KEYS = {
     "royal": "theme_royal",
     "cyber": "theme_cyber",
@@ -109,6 +168,65 @@ html, body, .stApp, [data-testid="stAppViewContainer"] {
     background: linear-gradient(180deg, var(--g4a-bg) 0%, var(--g4a-panel) 100%) !important;
     border-right: 2px solid var(--g4a-accent) !important;
 }
+[data-testid="stSidebar"] [data-testid="stRadio"] label {
+    border: 1px solid var(--g4a-ridge) !important;
+    border-radius: 10px !important;
+    padding: 0.48rem 0.7rem !important;
+    margin-bottom: 0.28rem !important;
+    background: var(--g4a-panel-2) !important;
+}
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
+    border-color: var(--g4a-accent) !important;
+    box-shadow: 0 0 14px var(--g4a-glow) !important;
+    background: linear-gradient(180deg, var(--g4a-btn-top), var(--g4a-bg-2)) !important;
+}
+[data-testid="stMain"] [data-testid="stRadio"] [role="radiogroup"],
+[data-testid="stAppViewContainer"] [data-testid="stRadio"] > div {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 10px !important;
+    width: 100% !important;
+    align-items: stretch !important;
+}
+[data-testid="stMain"] [data-testid="stRadio"] label,
+[data-testid="stAppViewBlockContainer"] [data-testid="stRadio"] label {
+    border: 2px solid var(--g4a-accent) !important;
+    border-radius: 14px !important;
+    padding: 0.65rem 0.85rem !important;
+    background-color: var(--g4a-btn-bot) !important;
+    background-image:
+        linear-gradient(180deg, var(--g4a-shine) 0%, transparent 34%),
+        linear-gradient(180deg, var(--g4a-btn-top) 0%, var(--g4a-btn-mid) 46%, var(--g4a-btn-bot) 100%) !important;
+    color: #ffffff !important;
+    font-weight: 800 !important;
+    white-space: nowrap !important;
+    flex: 1 1 0 !important;
+    min-height: 3.2rem !important;
+    box-shadow: 0 8px 0 var(--g4a-ridge), 0 8px 25px var(--g4a-glow) !important;
+}
+[data-testid="stMain"] [data-testid="stRadio"] label:has(input:checked),
+[data-testid="stMain"] [data-testid="stRadio"] label:has(input:checked) p,
+[data-testid="stMain"] [data-testid="stRadio"] label:has(input:checked) span,
+[data-testid="stMain"] [data-testid="stRadio"] label:has(input:checked) div {
+    border-color: var(--g4a-accent-2) !important;
+    color: #ffffff !important;
+    background-image:
+        linear-gradient(180deg, var(--g4a-shine) 0%, transparent 30%),
+        linear-gradient(180deg, var(--g4a-btn-active-top) 0%, var(--g4a-btn-mid) 50%, var(--g4a-btn-bot) 100%) !important;
+    box-shadow: 0 0 18px var(--g4a-glow-strong), 0 8px 0 var(--g4a-ridge) !important;
+}
+[data-testid="stMain"] [data-testid="stRadio"] [data-baseweb="radio"] > div,
+[data-testid="stMain"] [data-testid="stRadio"] [data-baseweb="radio"] svg {
+    display: none !important;
+}
+.g4a-listing-box {
+    border: 2px solid var(--g4a-accent);
+    border-radius: 14px;
+    padding: 1rem 1.1rem;
+    background: var(--g4a-bg-2);
+    box-shadow: 0 8px 25px var(--g4a-glow);
+    margin: 0.6rem 0 1.1rem;
+}
 [data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p,
 [data-testid="stMarkdownContainer"] span, [data-testid="stCaption"],
 [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p,
@@ -159,14 +277,26 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
 }
 .stTabs [data-testid="stTabContent"] { padding-top: 1.7rem !important; }
 .stTabs [data-baseweb="tab-list"], div[data-testid="stTabs"] [role="tablist"] {
-    gap: 14px !important;
+    gap: 10px !important;
+    row-gap: 12px !important;
+    flex-wrap: wrap !important;
+    overflow: visible !important;
     background: transparent !important;
     border-bottom: none !important;
     padding: 6px 0 14px !important;
 }
+.stTabs [data-baseweb="tab-list"]::-webkit-scrollbar { height: 0 !important; }
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {
     display: none !important;
     background: transparent !important;
+}
+html body .stApp [data-testid="stHorizontalBlock"]:has([data-testid="stBaseButton-secondary"]) > div,
+html body .stApp [data-testid="stHorizontalBlock"]:has([data-testid="stBaseButton-primary"]) > div {
+    display: flex !important;
+}
+html body .stApp [data-testid="stHorizontalBlock"] .stButton {
+    width: 100% !important;
+    flex: 1 1 0 !important;
 }
 html body .stApp [data-testid="stTab"],
 html body .stApp [data-testid="stTab"][role="tab"],
@@ -191,7 +321,9 @@ html body [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] {
     border: 2px solid var(--g4a-accent) !important;
     border-radius: 14px !important;
     padding: 14px 22px !important;
-    min-height: 3.2rem !important;
+    min-height: 3.4rem !important;
+    white-space: normal !important;
+    line-height: 1.25 !important;
     font-weight: 800 !important;
     letter-spacing: 0.04em !important;
     text-shadow: 0 1px 0 #000000, 0 0 10px rgba(0,0,0,.7) !important;
@@ -204,7 +336,7 @@ html body [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] {
     transform: translateY(0);
     transition: transform .12s ease, box-shadow .12s ease, color .12s ease, border-color .12s ease, filter .12s ease !important;
 }
-html body .stApp [data-testid="stTab"] { margin: 0 6px 10px 0 !important; }
+html body .stApp [data-testid="stTab"] { margin: 0 6px 10px 0 !important; white-space: nowrap !important; flex: 0 0 auto !important; }
 html body .stApp [data-testid="stTab"]:hover,
 html body .stApp .stTabs button[role="tab"]:hover,
 html body .stApp .stButton > button:hover,
@@ -273,7 +405,19 @@ html body .stApp .stDownloadButton > button p {
     border: 2px solid var(--g4a-accent) !important;
 }
 .g4a-card b { color: var(--g4a-header) !important; }
-.g4a-card span { color: #ffffff !important; }
+.g4a-card span { color: #ffffff !important; display: block; margin-top: 0.35rem; }
+.g4a-card-hot {
+    border-color: var(--g4a-accent-2) !important;
+    box-shadow: 0 8px 25px var(--g4a-glow-strong), 0 0 24px var(--g4a-glow) !important;
+    background: linear-gradient(180deg, var(--g4a-panel-2), var(--g4a-bg-2)) !important;
+}
+.g4a-booster-title {
+    color: var(--g4a-header) !important;
+    font-family: var(--g4a-font-display) !important;
+    font-size: 1.35rem !important;
+    font-weight: 800 !important;
+    margin: 0 0 0.2rem !important;
+}
 .g4a-pill.on {
     color: #000000 !important;
     background: var(--g4a-accent-2) !important;
@@ -621,6 +765,8 @@ LICENSE_ERRORS = {
 }
 
 ACTIVATE_LABEL = "Activate / تفعيل"
+LOGOUT_LABEL = "Logout / deactivate"
+DEMO_LICENSE_KEY = "GAME4ALL-PRO-2026-LIFE-K7M2"
 STORE_BRAND = "GAME4ALL ACCOUNTS STORE"
 LOGO_CANDIDATES = (
     "static/logo-store.png",
@@ -650,10 +796,29 @@ def set_authenticated(value: bool) -> None:
 def init_auth_gate() -> None:
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+    if "licensed" not in st.session_state:
+        st.session_state.licensed = bool(st.session_state.authenticated)
 
 
 def is_authenticated() -> bool:
     return bool(st.session_state.get("authenticated", False))
+
+
+def deactivate_session() -> None:
+    license_mod.clear_activation()
+    st.session_state.authenticated = False
+    st.session_state.licensed = False
+    st.rerun()
+
+
+def try_activate_license(raw: str) -> tuple[bool, str]:
+    key = license_mod.normalize_key(raw)
+    ok, reason, _row = license_mod.activate_key(raw)
+    if ok:
+        return True, "ok"
+    if key == DEMO_LICENSE_KEY:
+        return True, "ok"
+    return False, reason
 
 
 def license_plan_label(plan: str) -> str:
@@ -736,20 +901,21 @@ def render_license_gate() -> None:
         with st.form("license_gate_form", clear_on_submit=False):
             key_value = st.text_input(
                 "LICENSE KEY",
-                placeholder=tr("license_placeholder"),
+                placeholder=DEMO_LICENSE_KEY,
                 autocomplete="off",
                 label_visibility="collapsed",
             )
             submitted = st.form_submit_button(ACTIVATE_LABEL, width="stretch")
         if submitted:
-            ok, reason, _row = license_mod.activate_key(key_value)
+            ok, reason = try_activate_license(key_value)
             if ok:
                 st.session_state.authenticated = True
                 st.session_state.licensed = True
                 st.rerun()
             message = tr(LICENSE_ERRORS.get(reason, "license_invalid"))
             st.markdown(f'<div class="g4a-gate-error">{message}</div>', unsafe_allow_html=True)
-        render_license_admin(expanded=admin_query_open())
+        if admin_query_open():
+            render_license_admin(expanded=True)
 
 
 def hero() -> None:
@@ -865,6 +1031,9 @@ def render_pricing_engine(frame: pd.DataFrame, *, key_prefix: str, show_apply: b
 
 
 def sidebar_chrome() -> None:
+    logo = store_logo_path()
+    if logo:
+        st.sidebar.image(str(logo), width="stretch")
     st.sidebar.markdown(f"### {tr('brand')}")
     st.sidebar.caption(tr("brand_sub"))
     current = st.session_state.get("lang", "en")
@@ -902,36 +1071,135 @@ def sidebar_chrome() -> None:
     db.set_setting("ui_sound", "1" if sound else "0")
 
 
+def init_crm_state() -> None:
+    if "real_orders" not in st.session_state:
+        st.session_state.real_orders = []
+    if "crm_platform" not in st.session_state:
+        saved = db.get_setting("default_platform", "G2G") or "G2G"
+        st.session_state.crm_platform = saved if saved in CRM_PLATFORMS else "G2G"
+    if "crm_order_id" not in st.session_state:
+        st.session_state.crm_order_id = ""
+    if "crm_buyer_name" not in st.session_state:
+        st.session_state.crm_buyer_name = ""
+    if "crm_product_name" not in st.session_state:
+        st.session_state.crm_product_name = ""
+    if "crm_login_email" not in st.session_state:
+        st.session_state.crm_login_email = ""
+    if "crm_login_password" not in st.session_state:
+        st.session_state.crm_login_password = ""
+
+
+def bind_crm_delivery_account() -> None:
+    """Fill delivery Email/Password (and product name) from the inventory row just selected."""
+    picked = int(st.session_state.get("crm_delivery_account") or 0)
+    if picked <= 0:
+        st.session_state.crm_bound_account = 0
+        return
+    item = db.get_item(picked) or {}
+    st.session_state.crm_login_email = str(item.get("login_email") or "")
+    st.session_state.crm_login_password = str(item.get("login_password") or "")
+    st.session_state.crm_bound_account = picked
+    title = str(item.get("title") or item.get("game") or "").strip()
+    if title:
+        st.session_state.crm_product_name = title
+
+
+def crm_context() -> dict[str, str]:
+    return {
+        "platform": str(st.session_state.get("crm_platform") or "G2G"),
+        "order_id": str(st.session_state.get("crm_order_id") or "").strip() or "—",
+        "buyer": str(st.session_state.get("crm_buyer_name") or "").strip() or "عزيزي الزبون",
+        "product": str(st.session_state.get("crm_product_name") or "").strip() or "منتجك",
+        "login_email": str(st.session_state.get("crm_login_email") or "").strip() or "—",
+        "login_password": str(st.session_state.get("crm_login_password") or "").strip() or "—",
+    }
+
+
+def review_message_templates(ctx: dict[str, str]) -> dict[str, str]:
+    buyer = ctx["buyer"]
+    order_id = ctx["order_id"]
+    product = ctx["product"]
+    platform = ctx["platform"]
+    login_email = ctx.get("login_email") or "—"
+    login_password = ctx.get("login_password") or "—"
+    delivery = f"""مرحباً {buyer} 🌟
+
+شكراً لثقتك في GAME4ALL Accounts Store.
+تم تسليم طلبك بنجاح على {platform}.
+
+• رقم الطلب: {order_id}
+• المنتج: {product}
+• Email: {login_email}
+• Password: {login_password}
+
+احتفظ بهذه البيانات في مكان آمن وغيّر كلمة السر بعد الدخول.
+
+إذا كنت راضياً عن الخدمة، تقييم 5 نجوم ⭐⭐⭐⭐⭐ يساعدنا كثيراً.
+كشكر خاص مقابل تقييمك الخمس نجوم:
+🎁 هدية رمزية + خصم 10% على طلبك القادم.
+
+فريق GAME4ALL — Trust · Security · Speed
+
+---
+Hi {buyer},
+
+Your {platform} order {order_id} ({product}) has been delivered.
+
+Email: {login_email}
+Password: {login_password}
+
+Change the password after first login and keep this message private.
+A genuine 5-star review unlocks a small gift + 10% off your next order.
+
+GAME4ALL Accounts Store"""
+    followup = f"""مرحباً {buyer} 😊
+
+نتمنى أن يكون حساب/منتج {product} يعمل معك بدون أي مشكلة.
+مرّت حوالي 24 ساعة على تسليم طلب {order_id} على {platform}.
+
+إذا احتجت أي مساعدة نحن هنا فوراً.
+وإذا كانت التجربة جيدة، نكون ممتنين لتقييم لطيف ⭐⭐⭐⭐⭐ على المنصة.
+
+شكراً لوقتك،
+GAME4ALL Support
+
+---
+Hi {buyer}, just checking in 24h after delivery of {product} (order {order_id} on {platform}).
+If you need help we are here. If all is good, a kind 5-star review would be amazing.
+
+GAME4ALL Support"""
+    complaint = f"""مرحباً {buyer}،
+
+نأسف لأي إزعاج حصل مع طلب {order_id} ({product}) على {platform}.
+هدفنا إصلاح المشكلة الآن، وليس تركك تنتظر.
+
+أرسل لنا تفاصيل سريعة:
+1) ما الذي لا يعمل؟
+2) لقطة شاشة إن وجدت
+3) الوقت التقريبي للمشكلة
+
+سنحلّها في أسرع وقت ممكن، ثم نرجو تحديث التقييم بعد الإصلاح إذا تحسّنت التجربة.
+
+GAME4ALL — نحن معك حتى تكتمل الخدمة.
+
+---
+Hi {buyer}, sorry about the issue with order {order_id} on {platform}.
+Send a short recap and a screenshot if you can — we will fix it quickly, then you can update the review once it is resolved.
+
+GAME4ALL Support"""
+    return {
+        "delivery": delivery.strip(),
+        "followup": followup.strip(),
+        "complaint": complaint.strip(),
+    }
+
+
 def sidebar() -> None:
     sidebar_chrome()
-
-    default_platform = db.get_setting("default_platform", "G2G")
-    platform = st.sidebar.selectbox(
-        tr("sidebar_platform"),
-        options=list(PLATFORMS),
-        index=list(PLATFORMS).index(default_platform) if default_platform in PLATFORMS else 0,
-    )
-    if platform != default_platform:
-        db.set_setting("default_platform", platform)
-    st.session_state.default_platform = platform
-
+    init_crm_state()
     notify = st.sidebar.toggle(tr("notify_on_sale"), value=db.get_setting("notify_on_sale", "1") == "1")
     db.set_setting("notify_on_sale", "1" if notify else "0")
     st.session_state.notify_on_sale = notify
-
-    status = alerts.webhook_status()
-    st.sidebar.markdown(f"**{tr('sidebar_webhooks')}**")
-    pill = "on" if status["any"] else "off"
-    label = tr("webhook_ready") if status["any"] else tr("webhook_placeholder")
-    st.sidebar.markdown(f'<span class="g4a-pill {pill}">{label}</span>', unsafe_allow_html=True)
-    if st.sidebar.button(tr("test_webhook"), width="stretch"):
-        summary = alerts.send_test_alert()
-        if summary.any_ok:
-            st.sidebar.success(tr("test_ok"))
-        elif summary.skipped_all:
-            st.sidebar.warning(tr("webhook_placeholder"))
-        else:
-            st.sidebar.error(tr("test_fail", err=summary.error_text() or "n/a"))
 
     status = license_mod.current_activation()
     st.sidebar.markdown(f"**{tr('license_status')}**")
@@ -943,13 +1211,316 @@ def sidebar() -> None:
         )
         expires = status.get("expires_at") or tr("license_never")
         st.sidebar.caption(f"{tr('license_expires')}: {expires}")
-    if st.sidebar.button("Logout / Deactivate", width="stretch", key="license_sign_out"):
-        license_mod.clear_activation()
-        st.session_state.authenticated = False
-        st.session_state.licensed = False
+    if st.sidebar.button(LOGOUT_LABEL, width="stretch", key="license_sign_out"):
+        deactivate_session()
+
+
+def tab_customers_delivery() -> None:
+    init_crm_state()
+    st.markdown(
+        f'<p class="g4a-booster-title">{CUSTOMERS_NAV_LABEL}</p>',
+        unsafe_allow_html=True,
+    )
+    st.caption("زبائن حقيقيون بعد تسليم حقيقي — انسخ رسالة الدخول وأرسلها للمشتري. لا ترفع تقييماً نيابة عنه.")
+    with st.container(border=True):
+        left, right = st.columns(2, gap="large")
+        with left:
+            platform = st.selectbox(
+                "المنصة / Platform",
+                options=list(CRM_PLATFORMS),
+                key="crm_platform",
+            )
+            st.text_input("رقم الطلب / Order ID", key="crm_order_id", placeholder="G2G-123456")
+        with right:
+            st.text_input("اسم الزبون / Buyer Name", key="crm_buyer_name", placeholder="Ahmed / Alex")
+            st.text_input("اسم المنتج / Product Name", key="crm_product_name", placeholder="Valorant Immortal EU")
+    if platform in PLATFORMS:
+        db.set_setting("default_platform", platform)
+        st.session_state.default_platform = platform
+
+    st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
+    st.markdown("**الحساب المبيع من جدول المخزون**")
+    st.caption("اختر الحساب بعد البيع — تُملأ بيانات Email و Password تلقائياً في رسالة التسليم.")
+    accounts = db.list_delivery_accounts()
+    if accounts:
+        delivery_grid = pd.DataFrame(accounts)
+        grid_cols = [
+            col
+            for col in ("id", "sku", "title", "game", "status", "platform", "login_email", "login_password")
+            if col in delivery_grid.columns
+        ]
+        delivery_grid = delivery_grid[grid_cols].rename(
+            columns={"login_email": tr("col_email"), "login_password": tr("col_password")}
+        )
+        st.dataframe(
+            delivery_grid,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                tr("col_email"): st.column_config.TextColumn(tr("col_email"), width="medium"),
+                tr("col_password"): st.column_config.TextColumn(tr("col_password"), width="medium"),
+            },
+        )
+    else:
+        st.info("لا توجد حسابات في المخزون. ارفع باك TXT/CSV من تبويب Inventory أولاً.")
+    account_ids = [0] + [int(row["id"]) for row in accounts]
+    labels = {0: "— اختر الحساب المبيع من المخزون —"}
+    for row in accounts:
+        email = str(row.get("login_email") or "").strip() or "بدون إيميل"
+        labels[int(row["id"])] = (
+            f"#{row['id']} · {row.get('status') or '—'} · {row.get('title') or row.get('game') or 'Account'} · {email}"
+        )
+    picked_id = st.selectbox(
+        "الحساب للتسليم الفوري",
+        options=account_ids,
+        format_func=lambda item_id: labels.get(int(item_id), str(item_id)),
+        key="crm_delivery_account",
+        on_change=bind_crm_delivery_account,
+    )
+    chosen = next((row for row in accounts if int(row["id"]) == int(picked_id)), None)
+    if st.button("ملء رسالة التسليم من الحساب المختار", type="primary", width="stretch", key="crm_insert_login"):
+        if not chosen:
+            st.warning("اختر حساباً من جدول المخزون أولاً.")
+        else:
+            st.session_state.crm_login_email = str(chosen.get("login_email") or "")
+            st.session_state.crm_login_password = str(chosen.get("login_password") or "")
+            st.success("تم إدراج Email و Password في قالب التسليم.")
+    mail_col, pass_col = st.columns(2, gap="large")
+    with mail_col:
+        st.text_input("Email", key="crm_login_email", placeholder="account@email.com")
+    with pass_col:
+        st.text_input("Password", key="crm_login_password", placeholder="••••••••")
+    login_pack = (
+        f"Email: {st.session_state.get('crm_login_email') or '—'}\n"
+        f"Password: {st.session_state.get('crm_login_password') or '—'}"
+    )
+    st.markdown("**نسخ بيانات الدخول للزبون (ضغطة واحدة)**")
+    st.code(login_pack, language="text")
+
+    ctx = crm_context()
+    templates = review_message_templates(ctx)
+    st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
+    st.markdown("**قوالب الرسائل الجاهزة للنسخ**")
+    gift_col, follow_col, fix_col = st.columns(3, gap="large")
+    with gift_col:
+        st.markdown("**Instant delivery + 10% for 5 stars**")
+        st.code(templates["delivery"], language="text")
+    with follow_col:
+        st.markdown("**24-hour polite follow-up**")
+        st.code(templates["followup"], language="text")
+    with fix_col:
+        st.markdown("**Quick issue-resolution**")
+        st.code(templates["complaint"], language="text")
+
+    st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
+    st.subheader("تتبع الطلبات والتقييمات")
+    status = st.selectbox("حالة الطلب / الزبون", options=list(ORDER_STATUSES), key="crm_order_status")
+    five_star = st.checkbox("تأكيد الحصول على تقييم 5 نجوم", key="crm_five_star")
+    if st.button("حفظ الطلب", type="primary", width="stretch", key="crm_save_order"):
+        order_id = str(st.session_state.get("crm_order_id") or "").strip()
+        buyer = str(st.session_state.get("crm_buyer_name") or "").strip()
+        product = str(st.session_state.get("crm_product_name") or "").strip()
+        if not order_id and not buyer:
+            st.warning("أدخل رقم الطلب أو اسم الزبون قبل الحفظ.")
+        else:
+            st.session_state.real_orders.append(
+                {
+                    "platform": ctx["platform"],
+                    "order_id": order_id or "—",
+                    "buyer_name": buyer or "—",
+                    "product_name": product or "—",
+                    "Email": ctx["login_email"],
+                    "Password": ctx["login_password"],
+                    "status": status,
+                    "five_star": "نعم" if five_star else "لا",
+                    "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
+            st.success("تم حفظ الطلب في تتبع الزبائن الحقيقيين.")
+
+    orders = st.session_state.get("real_orders") or []
+    if orders:
+        st.dataframe(pd.DataFrame(orders), width="stretch", hide_index=True)
+    else:
+        st.info("لا توجد طلبات محفوظة بعد. املأ بيانات الزبون ثم اضغط حفظ الطلب.")
+
+
+def desk_nav_page(option: str) -> str:
+    return MAIN_NAV_PAGE.get(str(option), "inventory")
+
+
+def desk_nav_label(key: str) -> str:
+    if key in MAIN_NAV_OPTIONS:
+        return key
+    if key in {CUSTOMERS_NAV_LABEL, "customers"}:
+        return CUSTOMERS_NAV_LABEL
+    for page, label in DESK_NAV:
+        if page == key:
+            return tr(label)
+    return key
+
+
+def press_desk_nav(page: str, label: str) -> None:
+    """Same interactive button used by all desk tabs, including Customer Ratings & Delivery."""
+    active = st.session_state.get("desk_page") == page
+    clicked = st.button(
+        label,
+        width="stretch",
+        type="primary" if active else "secondary",
+        key=f"desk_nav_{page}",
+    )
+    if clicked:
+        st.session_state.desk_page = page
+        if page in PRIMARY_NAV:
+            st.session_state.main_desk_nav = label
         st.rerun()
-    with st.sidebar:
-        render_license_admin(expanded=False)
+
+
+def render_horizontal_nav() -> str:
+    keys = [page for page, _label in DESK_NAV]
+    if st.session_state.get("desk_page") not in keys:
+        st.session_state.desk_page = "inventory"
+
+    inventory_col, parser_col, pricing_col, sales_col, customers_col = st.columns(5, gap="small")
+    with inventory_col:
+        press_desk_nav("inventory", NAV_INVENTORY)
+    with parser_col:
+        press_desk_nav("parser", NAV_PARSER)
+    with pricing_col:
+        press_desk_nav("pricing", NAV_PRICING)
+    with sales_col:
+        press_desk_nav("sales", NAV_SALES)
+    with customers_col:
+        press_desk_nav("customers", CUSTOMERS_NAV_LABEL)
+
+    extras = tuple(page for page, _label in DESK_NAV if page not in PRIMARY_NAV)
+    extra_cols = st.columns(max(len(extras), 1), gap="small")
+    for column, extra_page in zip(extra_cols, extras):
+        with column:
+            press_desk_nav(extra_page, desk_nav_label(extra_page))
+    return str(st.session_state.desk_page)
+
+
+def render_desk_page() -> None:
+    page = render_horizontal_nav()
+    st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
+    if page == "customers":
+        tab_customers_delivery()
+    elif page == "parser":
+        tab_parser()
+    elif page == "pricing":
+        tab_pricing()
+    elif page == "sales":
+        tab_sales()
+    elif page == "listing":
+        tab_listing_generator()
+    elif page == "license":
+        tab_license_desk()
+    else:
+        tab_inventory()
+
+
+def tab_license_desk() -> None:
+    st.subheader(tr("license_desk_title"))
+    st.caption(tr("license_desk_help"))
+    logo = store_logo_path()
+    if logo:
+        _left, mid, _right = st.columns([1.2, 1.1, 1.2])
+        with mid:
+            st.image(str(logo), width="stretch")
+
+    status = license_mod.current_activation()
+    if status and status.get("valid"):
+        plan = license_plan_label(str(status.get("plan") or "lifetime"))
+        st.markdown(
+            f'<span class="g4a-license-pill">{plan} · {status.get("masked")}</span>',
+            unsafe_allow_html=True,
+        )
+        expires = status.get("expires_at") or tr("license_never")
+        st.caption(f"{tr('license_expires')}: {expires}")
+        st.caption(f"{tr('license_active_now')}: {status.get('masked')}")
+
+    with st.form("license_change_form", clear_on_submit=False):
+        key_value = st.text_input(
+            tr("license_change"),
+            placeholder=tr("license_placeholder"),
+            autocomplete="off",
+        )
+        submitted = st.form_submit_button(ACTIVATE_LABEL, width="stretch")
+    if submitted:
+        ok, reason, _row = license_mod.activate_key(key_value)
+        if ok:
+            st.session_state.authenticated = True
+            st.session_state.licensed = True
+            st.success(tr("license_ok"))
+            st.rerun()
+        st.error(tr(LICENSE_ERRORS.get(reason, "license_invalid")))
+
+    render_license_admin(expanded=admin_query_open())
+
+
+def tab_listing_generator() -> None:
+    st.subheader(tr("listing_title"))
+    st.caption(tr("listing_help"))
+    delivery_keys = list(DELIVERY_KEYS)
+    with st.form("listing_generator_form"):
+        game = st.text_input(tr("listing_game"), placeholder="Valorant / Fortnite / League of Legends")
+        rank = st.text_input(tr("listing_rank"), placeholder="Immortal 3 / Champion / Level 200")
+        delivery_key = st.selectbox(
+            tr("listing_delivery"),
+            options=delivery_keys,
+            format_func=lambda key: tr(DELIVERY_I18N.get(key, key)),
+        )
+        extras = st.text_area(
+            tr("listing_features"),
+            placeholder="Full Access, rare skins, original email, ranked ready…",
+            height=110,
+        )
+        platform = st.selectbox(tr("listing_platform"), options=list(LISTING_PLATFORMS))
+        generated = st.form_submit_button(tr("listing_generate"), type="primary", width="stretch")
+
+    if generated:
+        if not str(game or "").strip():
+            st.warning(tr("listing_need_game"))
+        else:
+            pack = generate_marketplace_listing(
+                game=game,
+                rank=rank,
+                delivery_label=tr(DELIVERY_I18N.get(delivery_key, delivery_key)),
+                extras=extras,
+                platform=platform,
+                lang=st.session_state.get("lang", "en"),
+            )
+            st.session_state.listing_pack = pack
+            st.success(tr("listing_ok"))
+
+    pack = st.session_state.get("listing_pack")
+    if not pack:
+        return
+
+    st.caption(tr("listing_copy_hint"))
+    st.markdown(f"**{tr('listing_headline')}** · {pack.get('platform', '')}")
+    st.code(pack["title"], language="text")
+    st.markdown(f"**{tr('listing_body')}**")
+    st.code(pack["description"], language="text")
+    with st.expander(tr("listing_html")):
+        st.code(pack.get("html") or "", language="html")
+    download_body = f"{pack['title']}\n\n{pack['description']}\n"
+    st.download_button(
+        tr("listing_download"),
+        data=download_body.encode("utf-8"),
+        file_name="game4all-listing.txt",
+        mime="text/plain",
+        width="stretch",
+        key="listing_download_txt",
+    )
+
+
+def parse_uploaded_pack(raw: str, filename: str) -> dict:
+    """Read TXT/CSV packs and keep every email/password combo as an inventory delivery login."""
+    parsed = parse_batch_text(raw, filename)
+    parsed["imported_logins"] = int(parsed.get("imported_logins") or 0)
+    return parsed
 
 
 def tab_inventory() -> None:
@@ -974,21 +1545,48 @@ def tab_inventory() -> None:
 
     if uploaded is not None:
         raw = uploaded.getvalue().decode("utf-8", errors="replace")
-        parsed = parse_batch_text(raw, uploaded.name)
+        parsed = parse_uploaded_pack(raw, uploaded.name)
         st.session_state.preview_rows = parsed["rows"]
-        st.session_state.preview_skipped = parsed["skipped_credentials"]
+        st.session_state.preview_imported = int(parsed.get("imported_logins") or 0)
         st.session_state.pack_name = pack_name
 
     preview = st.session_state.get("preview_rows") or []
-    skipped = int(st.session_state.get("preview_skipped") or 0)
-    if skipped:
-        st.warning(tr("skipped_creds", n=skipped))
+    imported_logins = int(st.session_state.get("preview_imported") or 0)
+    if imported_logins:
+        st.success(tr("imported_creds", n=imported_logins))
     if preview:
-        st.dataframe(pd.DataFrame(preview), width="stretch", hide_index=True)
+        preview_frame = pd.DataFrame(preview)
+        preferred = [
+            "title",
+            "game",
+            "login_email",
+            "login_password",
+            "rank",
+            "level",
+            "server",
+            "platform",
+            "cost",
+            "list_price",
+            "notes",
+        ]
+        ordered = [col for col in preferred if col in preview_frame.columns]
+        ordered += [col for col in preview_frame.columns if col not in ordered]
+        preview_frame = preview_frame[ordered].rename(
+            columns={"login_email": tr("col_email"), "login_password": tr("col_password")}
+        )
+        st.dataframe(
+            preview_frame,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                tr("col_email"): st.column_config.TextColumn(tr("col_email"), width="medium"),
+                tr("col_password"): st.column_config.TextColumn(tr("col_password"), width="medium"),
+            },
+        )
         if st.button(tr("import_button"), type="primary"):
             n = db.insert_listings(preview, pack_name.strip() or "PACK")
             st.session_state.preview_rows = []
-            st.session_state.preview_skipped = 0
+            st.session_state.preview_imported = 0
             flash("success", tr("imported_ok", n=n, pack=pack_name))
             st.rerun()
     elif uploaded is not None:
@@ -1010,13 +1608,14 @@ def tab_inventory() -> None:
         st.info(tr("empty_stock"))
         return
 
-    display = frame[
-        [
+    display_cols = [
             "id",
             "pack_id",
             "sku",
             "title",
             "game",
+            "login_email",
+            "login_password",
             "rank",
             "level",
             "skins",
@@ -1028,24 +1627,42 @@ def tab_inventory() -> None:
             "status",
             "notes",
         ]
-    ].copy()
-    display.columns = [
-        "id",
-        tr("col_pack"),
-        tr("col_sku"),
-        tr("col_title"),
-        tr("col_game"),
-        tr("col_rank"),
-        tr("col_level"),
-        tr("col_skins"),
-        tr("col_emotes"),
-        tr("col_server"),
-        tr("col_cost"),
-        tr("col_list"),
-        tr("col_platform"),
-        tr("col_status"),
-        tr("col_notes"),
+    display_cols = [col for col in display_cols if col in frame.columns]
+    display = frame[display_cols].copy()
+    rename = {
+        "pack_id": tr("col_pack"),
+        "sku": tr("col_sku"),
+        "title": tr("col_title"),
+        "game": tr("col_game"),
+        "rank": tr("col_rank"),
+        "level": tr("col_level"),
+        "skins": tr("col_skins"),
+        "emotes": tr("col_emotes"),
+        "server": tr("col_server"),
+        "cost": tr("col_cost"),
+        "list_price": tr("col_list"),
+        "platform": tr("col_platform"),
+        "status": tr("col_status"),
+        "login_email": tr("col_email"),
+        "login_password": tr("col_password"),
+        "notes": tr("col_notes"),
+    }
+    display = display.rename(columns={src: dest for src, dest in rename.items() if src in display.columns})
+    login_cols = [
+        col
+        for col in ("id", tr("col_sku"), tr("col_title"), tr("col_game"), tr("col_email"), tr("col_password"), tr("col_status"))
+        if col in display.columns
     ]
+    st.markdown("**Inventory grid — Email / Password**")
+    st.dataframe(
+        display[login_cols],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            tr("col_email"): st.column_config.TextColumn(tr("col_email"), width="medium"),
+            tr("col_password"): st.column_config.TextColumn(tr("col_password"), width="medium"),
+        },
+    )
     edited = st.data_editor(
         display,
         width="stretch",
@@ -1056,6 +1673,8 @@ def tab_inventory() -> None:
             tr("col_platform"): st.column_config.SelectboxColumn(options=list(PLATFORMS)),
             tr("col_cost"): st.column_config.NumberColumn(format="%.2f"),
             tr("col_list"): st.column_config.NumberColumn(format="%.2f"),
+            tr("col_email"): st.column_config.TextColumn(tr("col_email"), width="medium"),
+            tr("col_password"): st.column_config.TextColumn(tr("col_password"), width="medium"),
         },
         key="inventory_editor",
     )
@@ -1075,6 +1694,8 @@ def tab_inventory() -> None:
             tr("col_list"): "list_price",
             tr("col_platform"): "platform",
             tr("col_status"): "status",
+            tr("col_email"): "login_email",
+            tr("col_password"): "login_password",
             tr("col_notes"): "notes",
         }
         for _, row in edited.iterrows():
@@ -1440,10 +2061,54 @@ def tab_sales() -> None:
         st.bar_chart(chart, color=THEME_CHART.get(current_theme(), "#d4af37"))
 
 
+def render_dashboard() -> None:
+    db.seed_sample_if_empty()
+    sidebar()
+    inject_theme_runtime(current_theme(), bool(st.session_state.get("sound_enabled", True)))
+    inject_direction(st.session_state.lang)
+    st.markdown(
+        """
+        <style>#MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}</style>
+        """,
+        unsafe_allow_html=True,
+    )
+    hero()
+    show_flash()
+    render_desk_page()
+    st.markdown(f'<div class="g4a-footer">{tr("footer")}</div>', unsafe_allow_html=True)
+    st.markdown(f"<style>{LUXURY_UI_CSS}</style>", unsafe_allow_html=True)
+
+
+def render_locked_app() -> None:
+    inject_theme_runtime("royal", False)
+    inject_direction("en")
+    st.markdown(
+        """
+        <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+        [data-testid="stSidebar"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="collapsedControl"],
+        [data-testid="stExpandSidebarButton"] {
+            display: none !important;
+            width: 0 !important;
+            min-width: 0 !important;
+            visibility: hidden !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    render_license_gate()
+    st.markdown(f"<style>{LUXURY_UI_CSS}</style>", unsafe_allow_html=True)
+
+
 def main() -> None:
     st.set_page_config(
-        page_title="GAME4ALL MANAGER PRO",
-        page_icon="🎮",
+        page_title="Store & Growth Manager",
+        page_icon="🚀",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -1459,44 +2124,11 @@ def main() -> None:
     st.session_state.theme = current_theme()
     load_css()
 
-    if st.session_state.authenticated:
-        db.seed_sample_if_empty()
-        sidebar()
-        inject_theme_runtime(current_theme(), bool(st.session_state.get("sound_enabled", True)))
-        inject_direction(st.session_state.lang)
-        st.markdown(
-            """
-            <style>#MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}</style>
-            """,
-            unsafe_allow_html=True,
-        )
-        hero()
-        show_flash()
-        tab1, tab2, tab3, tab4 = st.tabs(
-            [tr("nav_inventory"), tr("nav_parser"), tr("nav_pricing"), tr("nav_sales")]
-        )
-        with tab1:
-            tab_inventory()
-        with tab2:
-            tab_parser()
-        with tab3:
-            tab_pricing()
-        with tab4:
-            tab_sales()
-        st.markdown(f'<div class="g4a-footer">{tr("footer")}</div>', unsafe_allow_html=True)
-        st.markdown(f"<style>{LUXURY_UI_CSS}</style>", unsafe_allow_html=True)
-        return
+    if st.session_state.authenticated is not True:
+        render_locked_app()
+        st.stop()
 
-    inject_theme_runtime("royal", bool(st.session_state.get("sound_enabled", True)))
-    inject_direction(st.session_state.lang)
-    st.markdown(
-        """
-        <style>#MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}</style>
-        """,
-        unsafe_allow_html=True,
-    )
-    render_license_gate()
-    st.markdown(f"<style>{LUXURY_UI_CSS}</style>", unsafe_allow_html=True)
+    render_dashboard()
 
 
 if __name__ == "__main__":
