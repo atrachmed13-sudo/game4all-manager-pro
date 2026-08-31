@@ -15,6 +15,37 @@ DEMO_KEYS = [
     ("GAME4ALL-PRO-2026-DEMO-K7M2", "enterprise", "Demo Lifetime License"),
 ]
 
+def get_setting(key: str, default: str = None) -> str:
+    """Retrieve application setting from database."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'")
+        if not cursor.fetchone():
+            return default
+        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        return row["value"] if row else default
+
+def save_setting(key: str, value: str):
+    """Save application setting to database."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)
+            """,
+            (key, value),
+        )
+        conn.commit()
+
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -34,7 +65,7 @@ def init_db():
     seed_demo_licenses()
 
 def seed_demo_licenses():
-    """Seed demo licenses with INSERT OR IGNORE to prevent unique constraint crash."""
+    """Seed demo licenses if table is empty or missing them using INSERT OR IGNORE."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         now = _utc_now()
@@ -47,4 +78,21 @@ def seed_demo_licenses():
                 """,
                 (key, _hash_key(key), plan, "active", note, now),
             )
+        conn.commit()
+
+def seed_sample_if_empty():
+    """Seed sample items if tables are empty."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS inventory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_name TEXT,
+                category TEXT,
+                price REAL,
+                stock INTEGER,
+                updated_at TEXT
+            )
+            """
+        )
         conn.commit()
