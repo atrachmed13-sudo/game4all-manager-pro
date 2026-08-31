@@ -80,6 +80,21 @@ def seed_demo_licenses():
             )
         conn.commit()
 
+def get_license(key: str):
+    """Retrieve a single license record by key or hash."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM licenses
+            WHERE license_key = ? OR key_hash = ?
+            """,
+            (key, _hash_key(key)),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
 def seed_sample_if_empty():
     """Seed sample items if tables are empty."""
     with sqlite3.connect(DB_PATH) as conn:
