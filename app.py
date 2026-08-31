@@ -51,40 +51,16 @@ ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 
 THEMES = ("royal", "cyber", "dark")
-NAV_INVENTORY = "Inventory & Packs"
-NAV_PARSER = "Parser & Descriptions"
-NAV_PRICING = "Pricing & Profit"
-NAV_SALES = "Sales & Analytics"
-CUSTOMERS_NAV_LABEL = "⭐ Customer Ratings & Delivery"
 DESK_NAV = (
     ("inventory", "nav_inventory"),
     ("parser", "nav_parser"),
     ("pricing", "nav_pricing"),
     ("sales", "nav_sales"),
-    ("customers", CUSTOMERS_NAV_LABEL),
+    ("customers", "nav_customers"),
     ("listing", "nav_listing"),
     ("license", "nav_license"),
 )
 PRIMARY_NAV = ("inventory", "parser", "pricing", "sales", "customers")
-MAIN_NAV_OPTIONS = (
-    NAV_INVENTORY,
-    NAV_PARSER,
-    NAV_PRICING,
-    NAV_SALES,
-    CUSTOMERS_NAV_LABEL,
-)
-MAIN_NAV_PAGE = {
-    NAV_INVENTORY: "inventory",
-    NAV_PARSER: "parser",
-    NAV_PRICING: "pricing",
-    NAV_SALES: "sales",
-    CUSTOMERS_NAV_LABEL: "customers",
-    "inventory": "inventory",
-    "parser": "parser",
-    "pricing": "pricing",
-    "sales": "sales",
-    "customers": "customers",
-}
 NAV_I18N = {
     "license": "nav_license",
     "listing": "nav_listing",
@@ -92,6 +68,7 @@ NAV_I18N = {
     "parser": "nav_parser",
     "pricing": "nav_pricing",
     "sales": "nav_sales",
+    "customers": "nav_customers",
 }
 DELIVERY_I18N = {
     "instant": "delivery_instant",
@@ -1218,7 +1195,7 @@ def sidebar() -> None:
 def tab_customers_delivery() -> None:
     init_crm_state()
     st.markdown(
-        f'<p class="g4a-booster-title">{CUSTOMERS_NAV_LABEL}</p>',
+        f'<p class="g4a-booster-title">{tr("nav_customers")}</p>',
         unsafe_allow_html=True,
     )
     st.caption("زبائن حقيقيون بعد تسليم حقيقي — انسخ رسالة الدخول وأرسلها للمشتري. لا ترفع تقييماً نيابة عنه.")
@@ -1345,19 +1322,10 @@ def tab_customers_delivery() -> None:
         st.info("لا توجد طلبات محفوظة بعد. املأ بيانات الزبون ثم اضغط حفظ الطلب.")
 
 
-def desk_nav_page(option: str) -> str:
-    return MAIN_NAV_PAGE.get(str(option), "inventory")
-
-
-def desk_nav_label(key: str) -> str:
-    if key in MAIN_NAV_OPTIONS:
-        return key
-    if key in {CUSTOMERS_NAV_LABEL, "customers"}:
-        return CUSTOMERS_NAV_LABEL
-    for page, label in DESK_NAV:
-        if page == key:
-            return tr(label)
-    return key
+def desk_nav_label(page: str) -> str:
+    """Look up the current-language label for a desk page (translated live via tr())."""
+    key = NAV_I18N.get(page)
+    return tr(key) if key else page
 
 
 def press_desk_nav(page: str, label: str) -> None:
@@ -1383,15 +1351,15 @@ def render_horizontal_nav() -> str:
 
     inventory_col, parser_col, pricing_col, sales_col, customers_col = st.columns(5, gap="small")
     with inventory_col:
-        press_desk_nav("inventory", NAV_INVENTORY)
+        press_desk_nav("inventory", desk_nav_label("inventory"))
     with parser_col:
-        press_desk_nav("parser", NAV_PARSER)
+        press_desk_nav("parser", desk_nav_label("parser"))
     with pricing_col:
-        press_desk_nav("pricing", NAV_PRICING)
+        press_desk_nav("pricing", desk_nav_label("pricing"))
     with sales_col:
-        press_desk_nav("sales", NAV_SALES)
+        press_desk_nav("sales", desk_nav_label("sales"))
     with customers_col:
-        press_desk_nav("customers", CUSTOMERS_NAV_LABEL)
+        press_desk_nav("customers", desk_nav_label("customers"))
 
     extras = tuple(page for page, _label in DESK_NAV if page not in PRIMARY_NAV)
     extra_cols = st.columns(max(len(extras), 1), gap="small")
