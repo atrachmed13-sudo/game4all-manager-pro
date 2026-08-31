@@ -79,11 +79,12 @@ DELIVERY_I18N = {
     "hours_24": "delivery_24h",
 }
 CRM_PLATFORMS = ("G2G", "Eldorado", "PlayerAuctions", "FanPay")
-ORDER_STATUSES = (
-    "تم التسليم (في انتظار التقييم)",
-    "تم التقييم بنجاح ⭐",
-    "يحتاج متابعة/مشكلة",
-)
+ORDER_STATUS_KEYS = ("delivered_pending", "rated_success", "needs_followup")
+ORDER_STATUS_I18N = {
+    "delivered_pending": "order_status_delivered_pending",
+    "rated_success": "order_status_rated_success",
+    "needs_followup": "order_status_needs_followup",
+}
 OTHER_TOOL_PAGES = ("listing", "inventory", "parser", "pricing", "sales", "license")
 THEME_LABEL_KEYS = {
     "royal": "theme_royal",
@@ -1086,21 +1087,16 @@ def crm_context() -> dict[str, str]:
     return {
         "platform": str(st.session_state.get("crm_platform") or "G2G"),
         "order_id": str(st.session_state.get("crm_order_id") or "").strip() or "—",
-        "buyer": str(st.session_state.get("crm_buyer_name") or "").strip() or "عزيزي الزبون",
-        "product": str(st.session_state.get("crm_product_name") or "").strip() or "منتجك",
+        "buyer": str(st.session_state.get("crm_buyer_name") or "").strip() or tr("crm_fallback_buyer"),
+        "product": str(st.session_state.get("crm_product_name") or "").strip() or tr("crm_fallback_product"),
         "login_email": str(st.session_state.get("crm_login_email") or "").strip() or "—",
         "login_password": str(st.session_state.get("crm_login_password") or "").strip() or "—",
     }
 
 
-def review_message_templates(ctx: dict[str, str]) -> dict[str, str]:
-    buyer = ctx["buyer"]
-    order_id = ctx["order_id"]
-    product = ctx["product"]
-    platform = ctx["platform"]
-    login_email = ctx.get("login_email") or "—"
-    login_password = ctx.get("login_password") or "—"
-    delivery = f"""مرحباً {buyer} 🌟
+CRM_TEMPLATE_TEXT = {
+    "ar": {
+        "delivery": """مرحباً {buyer} 🌟
 
 شكراً لثقتك في GAME4ALL Accounts Store.
 تم تسليم طلبك بنجاح على {platform}.
@@ -1116,21 +1112,8 @@ def review_message_templates(ctx: dict[str, str]) -> dict[str, str]:
 كشكر خاص مقابل تقييمك الخمس نجوم:
 🎁 هدية رمزية + خصم 10% على طلبك القادم.
 
-فريق GAME4ALL — Trust · Security · Speed
-
----
-Hi {buyer},
-
-Your {platform} order {order_id} ({product}) has been delivered.
-
-Email: {login_email}
-Password: {login_password}
-
-Change the password after first login and keep this message private.
-A genuine 5-star review unlocks a small gift + 10% off your next order.
-
-GAME4ALL Accounts Store"""
-    followup = f"""مرحباً {buyer} 😊
+فريق GAME4ALL — Trust · Security · Speed""",
+        "followup": """مرحباً {buyer} 😊
 
 نتمنى أن يكون حساب/منتج {product} يعمل معك بدون أي مشكلة.
 مرّت حوالي 24 ساعة على تسليم طلب {order_id} على {platform}.
@@ -1139,14 +1122,8 @@ GAME4ALL Accounts Store"""
 وإذا كانت التجربة جيدة، نكون ممتنين لتقييم لطيف ⭐⭐⭐⭐⭐ على المنصة.
 
 شكراً لوقتك،
-GAME4ALL Support
-
----
-Hi {buyer}, just checking in 24h after delivery of {product} (order {order_id} on {platform}).
-If you need help we are here. If all is good, a kind 5-star review would be amazing.
-
-GAME4ALL Support"""
-    complaint = f"""مرحباً {buyer}،
+GAME4ALL Support""",
+        "complaint": """مرحباً {buyer}،
 
 نأسف لأي إزعاج حصل مع طلب {order_id} ({product}) على {platform}.
 هدفنا إصلاح المشكلة الآن، وليس تركك تنتظر.
@@ -1158,18 +1135,50 @@ GAME4ALL Support"""
 
 سنحلّها في أسرع وقت ممكن، ثم نرجو تحديث التقييم بعد الإصلاح إذا تحسّنت التجربة.
 
-GAME4ALL — نحن معك حتى تكتمل الخدمة.
+GAME4ALL — نحن معك حتى تكتمل الخدمة.""",
+    },
+    "en": {
+        "delivery": """Hi {buyer} 🌟
 
----
-Hi {buyer}, sorry about the issue with order {order_id} on {platform}.
-Send a short recap and a screenshot if you can — we will fix it quickly, then you can update the review once it is resolved.
+Thank you for trusting GAME4ALL Accounts Store.
+Your {platform} order has been delivered successfully.
 
-GAME4ALL Support"""
-    return {
-        "delivery": delivery.strip(),
-        "followup": followup.strip(),
-        "complaint": complaint.strip(),
-    }
+• Order ID: {order_id}
+• Product: {product}
+• Email: {login_email}
+• Password: {login_password}
+
+Keep this information safe and change the password after your first login.
+
+If you are happy with the service, a 5-star review ⭐⭐⭐⭐⭐ helps us a lot.
+As a special thank-you for your 5-star review:
+🎁 a small gift + 10% off your next order.
+
+GAME4ALL Team — Trust · Security · Speed""",
+        "followup": """Hi {buyer} 😊, just checking in 24h after delivery of {product} (order {order_id} on {platform}).
+If you need any help, we are here right away. If everything is working well, a kind 5-star review would mean a lot.
+
+Thanks for your time,
+GAME4ALL Support""",
+        "complaint": """Hi {buyer}, sorry about the issue with order {order_id} ({product}) on {platform}.
+Our goal is to fix it right now, not keep you waiting.
+
+Please send us a quick recap:
+1) What isn't working?
+2) A screenshot if you have one
+3) Roughly when it happened
+
+We will resolve it as fast as possible — please update your review once it's fixed if the experience improves.
+
+GAME4ALL — with you until the job is done.""",
+    },
+}
+
+
+def review_message_templates(ctx: dict[str, str], lang: str = "en") -> dict[str, str]:
+    lang_key = lang if lang in CRM_TEMPLATE_TEXT else "en"
+    pack = CRM_TEMPLATE_TEXT[lang_key]
+    return {key: text.format(**ctx).strip() for key, text in pack.items()}
 
 
 def sidebar() -> None:
@@ -1214,26 +1223,26 @@ def tab_customers_delivery() -> None:
         f'<p class="g4a-booster-title">{tr("nav_customers")}</p>',
         unsafe_allow_html=True,
     )
-    st.caption("زبائن حقيقيون بعد تسليم حقيقي — انسخ رسالة الدخول وأرسلها للمشتري. لا ترفع تقييماً نيابة عنه.")
+    st.caption(tr("crm_notice"))
     with st.container(border=True):
         left, right = st.columns(2, gap="large")
         with left:
             platform = st.selectbox(
-                "المنصة / Platform",
+                tr("crm_platform_label"),
                 options=list(CRM_PLATFORMS),
                 key="crm_platform",
             )
-            st.text_input("رقم الطلب / Order ID", key="crm_order_id", placeholder="G2G-123456")
+            st.text_input(tr("crm_order_id_label"), key="crm_order_id", placeholder="G2G-123456")
         with right:
-            st.text_input("اسم الزبون / Buyer Name", key="crm_buyer_name", placeholder="Ahmed / Alex")
-            st.text_input("اسم المنتج / Product Name", key="crm_product_name", placeholder="Valorant Immortal EU")
+            st.text_input(tr("crm_buyer_label"), key="crm_buyer_name", placeholder="Ahmed / Alex")
+            st.text_input(tr("crm_product_label"), key="crm_product_name", placeholder="Valorant Immortal EU")
     if platform in PLATFORMS:
         db.set_setting("default_platform", platform)
         st.session_state.default_platform = platform
 
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
-    st.markdown("**الحساب المبيع من جدول المخزون**")
-    st.caption("اختر الحساب بعد البيع — تُملأ بيانات Email و Password تلقائياً في رسالة التسليم.")
+    st.markdown(f"**{tr('crm_account_section_title')}**")
+    st.caption(tr("crm_account_section_help"))
     accounts = db.list_delivery_accounts()
     if accounts:
         delivery_grid = pd.DataFrame(accounts)
@@ -1255,29 +1264,29 @@ def tab_customers_delivery() -> None:
             },
         )
     else:
-        st.info("لا توجد حسابات في المخزون. ارفع باك TXT/CSV من تبويب Inventory أولاً.")
+        st.info(tr("crm_no_accounts"))
     account_ids = [0] + [int(row["id"]) for row in accounts]
-    labels = {0: "— اختر الحساب المبيع من المخزون —"}
+    labels = {0: tr("crm_account_none_option")}
     for row in accounts:
-        email = str(row.get("login_email") or "").strip() or "بدون إيميل"
+        email = str(row.get("login_email") or "").strip() or tr("crm_no_email")
         labels[int(row["id"])] = (
             f"#{row['id']} · {row.get('status') or '—'} · {row.get('title') or row.get('game') or 'Account'} · {email}"
         )
     picked_id = st.selectbox(
-        "الحساب للتسليم الفوري",
+        tr("crm_delivery_account_label"),
         options=account_ids,
         format_func=lambda item_id: labels.get(int(item_id), str(item_id)),
         key="crm_delivery_account",
         on_change=bind_crm_delivery_account,
     )
     chosen = next((row for row in accounts if int(row["id"]) == int(picked_id)), None)
-    if st.button("ملء رسالة التسليم من الحساب المختار", type="primary", width="stretch", key="crm_insert_login"):
+    if st.button(tr("crm_fill_button"), type="primary", width="stretch", key="crm_insert_login"):
         if not chosen:
-            st.warning("اختر حساباً من جدول المخزون أولاً.")
+            st.warning(tr("crm_fill_warning"))
         else:
             st.session_state.crm_login_email = str(chosen.get("login_email") or "")
             st.session_state.crm_login_password = str(chosen.get("login_password") or "")
-            st.success("تم إدراج Email و Password في قالب التسليم.")
+            st.success(tr("crm_fill_success"))
     mail_col, pass_col = st.columns(2, gap="large")
     with mail_col:
         st.text_input("Email", key="crm_login_email", placeholder="account@email.com")
@@ -1287,34 +1296,40 @@ def tab_customers_delivery() -> None:
         f"Email: {st.session_state.get('crm_login_email') or '—'}\n"
         f"Password: {st.session_state.get('crm_login_password') or '—'}"
     )
-    st.markdown("**نسخ بيانات الدخول للزبون (ضغطة واحدة)**")
+    st.markdown(f"**{tr('crm_copy_login_title')}**")
     st.code(login_pack, language="text")
 
     ctx = crm_context()
-    templates = review_message_templates(ctx)
+    active_lang = st.session_state.get("lang", "en")
+    templates = review_message_templates(ctx, active_lang)
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
-    st.markdown("**قوالب الرسائل الجاهزة للنسخ**")
+    st.markdown(f"**{tr('crm_templates_title')}**")
     gift_col, follow_col, fix_col = st.columns(3, gap="large")
     with gift_col:
-        st.markdown("**Instant delivery + 10% for 5 stars**")
+        st.markdown(f"**{tr('crm_template_delivery_label')}**")
         st.code(templates["delivery"], language="text")
     with follow_col:
-        st.markdown("**24-hour polite follow-up**")
+        st.markdown(f"**{tr('crm_template_followup_label')}**")
         st.code(templates["followup"], language="text")
     with fix_col:
-        st.markdown("**Quick issue-resolution**")
+        st.markdown(f"**{tr('crm_template_complaint_label')}**")
         st.code(templates["complaint"], language="text")
 
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
-    st.subheader("تتبع الطلبات والتقييمات")
-    status = st.selectbox("حالة الطلب / الزبون", options=list(ORDER_STATUSES), key="crm_order_status")
-    five_star = st.checkbox("تأكيد الحصول على تقييم 5 نجوم", key="crm_five_star")
-    if st.button("حفظ الطلب", type="primary", width="stretch", key="crm_save_order"):
+    st.subheader(tr("crm_tracking_title"))
+    status_key = st.selectbox(
+        tr("crm_status_label"),
+        options=list(ORDER_STATUS_KEYS),
+        format_func=lambda key: tr(ORDER_STATUS_I18N.get(key, key)),
+        key="crm_order_status",
+    )
+    five_star = st.checkbox(tr("crm_five_star_label"), key="crm_five_star")
+    if st.button(tr("crm_save_order_button"), type="primary", width="stretch", key="crm_save_order"):
         order_id = str(st.session_state.get("crm_order_id") or "").strip()
         buyer = str(st.session_state.get("crm_buyer_name") or "").strip()
         product = str(st.session_state.get("crm_product_name") or "").strip()
         if not order_id and not buyer:
-            st.warning("أدخل رقم الطلب أو اسم الزبون قبل الحفظ.")
+            st.warning(tr("crm_save_warning"))
         else:
             st.session_state.real_orders.append(
                 {
@@ -1324,18 +1339,18 @@ def tab_customers_delivery() -> None:
                     "product_name": product or "—",
                     "Email": ctx["login_email"],
                     "Password": ctx["login_password"],
-                    "status": status,
-                    "five_star": "نعم" if five_star else "لا",
+                    "status": tr(ORDER_STATUS_I18N.get(status_key, status_key)),
+                    "five_star": tr("crm_five_star_yes") if five_star else tr("crm_five_star_no"),
                     "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 }
             )
-            st.success("تم حفظ الطلب في تتبع الزبائن الحقيقيين.")
+            st.success(tr("crm_save_success"))
 
     orders = st.session_state.get("real_orders") or []
     if orders:
         st.dataframe(pd.DataFrame(orders), width="stretch", hide_index=True)
     else:
-        st.info("لا توجد طلبات محفوظة بعد. املأ بيانات الزبون ثم اضغط حفظ الطلب.")
+        st.info(tr("crm_orders_empty"))
 
 
 def desk_nav_label(page: str) -> str:
