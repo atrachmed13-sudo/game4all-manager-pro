@@ -27,7 +27,7 @@ def get_setting(key: str, default: str = None) -> str:
         row = cursor.fetchone()
         return row["value"] if row else default
 
-def save_setting(key: str, value: str):
+def set_setting(key: str, value: str):
     """Save application setting to database."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -111,3 +111,51 @@ def seed_sample_if_empty():
             """
         )
         conn.commit()
+        def insert_license(license_key: str, plan: str, note: str = ""):
+    """Insert a new license into the database."""
+    with sqlite3.connect(DB_PATH) as conn:
+        now = _utc_now()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO licenses
+                (license_key, key_hash, plan, status, note, issued_at)
+            VALUES (?, ?, ?, 'inactive', ?, ?)
+            """,
+            (license_key, _hash_key(license_key), plan, note, now),
+        )
+        conn.commit()
+
+def mark_license_activated(key: str, device_id: str = ""):
+    """Mark a license as activated."""
+    with sqlite3.connect(DB_PATH) as conn:
+        now = _utc_now()
+        conn.execute(
+            """
+            UPDATE licenses 
+            SET status = 'active', activated_at = ?, device_id = ?
+            WHERE license_key = ? OR key_hash = ?
+            """,
+            (now, device_id, key, _hash_key(key)),
+        )
+        conn.commit()
+
+def set_license_status(key: str, status: str):
+    """Update license status."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE licenses 
+            SET status = ?
+            WHERE license_key = ? OR key_hash = ?
+            """,
+            (status, key, _hash_key(key)),
+        )
+        conn.commit()
+
+def list_licenses():
+    """List all licenses in the database."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM licenses ORDER BY id DESC")
+        return cursor.fetchall()
