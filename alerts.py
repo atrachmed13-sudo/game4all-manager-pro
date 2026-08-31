@@ -1,10 +1,15 @@
-"""Discord / Telegram sale alerts. Credentials come from the environment only.
+"""Discord / Telegram sale alerts.
+
+Credentials are read from, in order:
+
+    1. Environment variables (system env or a local .env via python-dotenv)
+    2. Streamlit Secrets (st.secrets) — used automatically on Streamlit Cloud
 
     DISCORD_WEBHOOK_URL
     TELEGRAM_BOT_TOKEN
     TELEGRAM_CHAT_ID
 
-If those are empty, notify_sale() returns a skipped result — the UI shows a
+If those are empty everywhere, notify_sale() returns a skipped result — the UI shows a
 placeholder instead of failing the sale save.
 """
 
@@ -22,6 +27,24 @@ DISCORD_PREFIXES = (
     "https://discord.com/api/webhooks/",
     "https://discordapp.com/api/webhooks/",
 )
+
+
+def _read_secret(name: str) -> str:
+    """Read a config value from the environment first, then Streamlit Secrets as a fallback.
+
+    This lets the Discord/Telegram dispatcher work out of the box on Streamlit Cloud (where
+    secrets.toml is the standard way to store credentials) as well as with a local .env file,
+    without changing any call site.
+    """
+    value = (os.getenv(name) or "").strip()
+    if value:
+        return value
+    try:
+        import streamlit as st  # local import: keep this module usable without a live Streamlit runtime
+
+        return str(st.secrets.get(name, "") or "").strip()
+    except Exception:
+        return ""
 
 
 @dataclass
@@ -64,8 +87,8 @@ class AlertSummary:
 
 
 def webhook_status() -> dict[str, bool]:
-    discord = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
-    telegram = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip() and (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    discord = _read_secret("DISCORD_WEBHOOK_URL")
+    telegram = _read_secret("TELEGRAM_BOT_TOKEN") and _read_secret("TELEGRAM_CHAT_ID")
     return {
         "discord": discord.startswith(DISCORD_PREFIXES),
         "telegram": bool(telegram),
@@ -78,7 +101,7 @@ def _discord_ok(url: str) -> bool:
 
 
 def _post_discord(message: str, embed: dict[str, Any] | None = None) -> AlertResult:
-    url = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
+    url = _read_secret("DISCORD_WEBHOOK_URL")
     if not url:
         return AlertResult(ok=False, channel="discord", skipped=True, error="DISCORD_WEBHOOK_URL is empty")
     if not _discord_ok(url):
@@ -101,8 +124,8 @@ def _post_discord(message: str, embed: dict[str, Any] | None = None) -> AlertRes
 
 
 def _post_telegram(message: str) -> AlertResult:
-    token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    token = _read_secret("TELEGRAM_BOT_TOKEN")
+    chat_id = _read_secret("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         return AlertResult(ok=False, channel="telegram", skipped=True, error="Telegram token/chat placeholder is empty")
     url = TELEGRAM_API.format(token=token)
@@ -128,8 +151,8 @@ def push_telegram_message(message: str, *, parse_mode: str = "HTML") -> AlertRes
     Used by the Hyper-Listing & Secure Telegram Dispatcher to push a listing card
     bundled with fresh delivery credentials and a session-revocation confirmation stamp.
     """
-    token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    token = _read_secret("TELEGRAM_BOT_TOKEN")
+    chat_id = _read_secret("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         return AlertResult(ok=False, channel="telegram", skipped=True, error="Telegram token/chat placeholder is empty")
     url = TELEGRAM_API.format(token=token)
