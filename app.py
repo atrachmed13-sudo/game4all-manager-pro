@@ -1179,6 +1179,21 @@ def sidebar() -> None:
     db.set_setting("notify_on_sale", "1" if notify else "0")
     st.session_state.notify_on_sale = notify
 
+    webhook_state = alerts.webhook_status()
+    st.sidebar.markdown(f"**{tr('sidebar_webhooks')}**")
+    if webhook_state.get("any"):
+        st.sidebar.success(tr("webhook_ready"))
+    else:
+        st.sidebar.caption(tr("webhook_placeholder"))
+    if st.sidebar.button(tr("test_webhook"), width="stretch", key="sidebar_test_webhook"):
+        test_summary = alerts.send_test_alert()
+        if test_summary.any_ok:
+            st.sidebar.success(tr("alert_sent"))
+        elif test_summary.skipped_all:
+            st.sidebar.caption(tr("webhook_placeholder"))
+        else:
+            st.sidebar.error(test_summary.error_text() or tr("webhook_placeholder"))
+
     status = license_mod.current_activation()
     st.sidebar.markdown(f"**{tr('license_status')}**")
     if status and status.get("valid"):
