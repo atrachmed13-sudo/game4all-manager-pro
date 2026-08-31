@@ -44,6 +44,7 @@ LISTING_PLATFORMS = parser_mod.LISTING_PLATFORMS
 extract_features = parser_mod.extract_features
 feature_cards = parser_mod.feature_cards
 generate_marketplace_listing = parser_mod.generate_marketplace_listing
+generate_hyper_listing = parser_mod.generate_hyper_listing
 generate_sales_copy = parser_mod.generate_sales_copy
 parse_batch_text = parser_mod.parse_batch_text
 
@@ -1492,7 +1493,12 @@ def parse_uploaded_pack(raw: str, filename: str) -> dict:
 
 
 def render_security_action() -> None:
-    """Let the seller revoke old device sessions and lock the security flag on a delivered account."""
+    """Secure & Unlink Sessions + Hyper-Listing & Secure Telegram Dispatcher.
+
+    Revokes old device sessions and locks the security flag on the chosen account, then
+    auto-generates a high-converting G2G/Eldorado marketing card bundled with the fresh
+    credentials and a session-revocation stamp, ready to push straight to Telegram.
+    """
     st.subheader(tr("security_action_title"))
     st.caption(tr("security_action_help"))
 
@@ -1529,8 +1535,51 @@ def render_security_action() -> None:
             key="security_action_apply",
         ):
             db.secure_and_revoke_sessions([int(chosen_id)])
+            secured_row = db.get_item(int(chosen_id)) or {}
+            extras_text = ", ".join(
+                bit for bit in (str(secured_row.get(f) or "").strip() for f in ("extras", "skins", "emotes")) if bit
+            )
+            st.session_state.hyper_listing_pack = generate_hyper_listing(
+                item_id=int(chosen_id),
+                title=str(secured_row.get("title") or ""),
+                game=str(secured_row.get("game") or ""),
+                rank=str(secured_row.get("rank") or ""),
+                extras=extras_text,
+                platform=str(secured_row.get("platform") or "G2G"),
+                login_email=str(secured_row.get("login_email") or ""),
+                login_password=str(secured_row.get("login_password") or ""),
+                secured_at=str(secured_row.get("sessions_revoked_at") or ""),
+                lang=st.session_state.get("lang", "en"),
+            )
             flash("success", tr("security_action_success", id=int(chosen_id)))
             st.rerun()
+
+    hyper_pack = st.session_state.get("hyper_listing_pack")
+    if not hyper_pack:
+        return
+
+    st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
+    st.markdown(f"### {tr('hyper_listing_title')}")
+    st.caption(tr("hyper_listing_help"))
+    st.markdown(hyper_pack["card_markdown"])
+
+    push_col, _spacer_col = st.columns([1, 2])
+    with push_col:
+        push_clicked = st.button(
+            tr("hyper_listing_push"),
+            type="primary",
+            width="stretch",
+            key="hyper_listing_push_btn",
+        )
+    if push_clicked:
+        result = alerts.push_telegram_message(hyper_pack["telegram_html"], parse_mode="HTML")
+        if result.ok:
+            flash("success", tr("hyper_listing_push_ok"))
+        elif result.skipped:
+            flash("warning", tr("hyper_listing_push_skipped"))
+        else:
+            flash("error", tr("hyper_listing_push_fail", error=result.error or "?"))
+        st.rerun()
 
 
 def tab_inventory() -> None:

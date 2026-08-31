@@ -122,6 +122,38 @@ def _post_telegram(message: str) -> AlertResult:
         return AlertResult(ok=False, channel="telegram", error=str(exc))
 
 
+def push_telegram_message(message: str, *, parse_mode: str = "HTML") -> AlertResult:
+    """Send a rich-formatted (HTML/Markdown) message to Telegram.
+
+    Used by the Hyper-Listing & Secure Telegram Dispatcher to push a listing card
+    bundled with fresh delivery credentials and a session-revocation confirmation stamp.
+    """
+    token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    if not token or not chat_id:
+        return AlertResult(ok=False, channel="telegram", skipped=True, error="Telegram token/chat placeholder is empty")
+    url = TELEGRAM_API.format(token=token)
+    try:
+        response = requests.post(
+            url,
+            json={
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": True,
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        if 200 <= response.status_code < 300:
+            body = response.json() if "application/json" in (response.headers.get("content-type") or "") else {}
+            if isinstance(body, dict) and body.get("ok") is False:
+                return AlertResult(ok=False, channel="telegram", status_code=response.status_code, error=str(body.get("description") or "Telegram rejected the message"))
+            return AlertResult(ok=True, channel="telegram", status_code=response.status_code)
+        return AlertResult(ok=False, channel="telegram", status_code=response.status_code, error=f"HTTP {response.status_code}")
+    except requests.RequestException as exc:
+        return AlertResult(ok=False, channel="telegram", error=str(exc))
+
+
 def format_sale_message(
     *,
     title: str,

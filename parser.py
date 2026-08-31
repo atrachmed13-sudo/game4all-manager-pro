@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+from html import escape as _html_escape
 from typing import Any
 
 from pricing import PLATFORMS, get_platform_profile
@@ -666,4 +667,135 @@ def generate_marketplace_listing(
         "html": "\n".join(html_lines),
         "platform": market,
         "lang": lang_key,
+    }
+
+
+HYPER_LISTING_LABELS = {
+    "en": {
+        "banner": "HYPER LISTING",
+        "creds": "🔐 Secure Delivery Credentials",
+        "email": "Email",
+        "password": "Password",
+        "stamp_title": "✅ Session Revocation Confirmed",
+        "stamp_body": "All old device sessions were revoked and unlinked at {ts} UTC — safe to hand over.",
+        "stamp_pending_title": "⏳ Sessions Not Yet Revoked",
+        "stamp_pending_body": "Run the Secure & Unlink Sessions action before sharing this card with a buyer.",
+        "footer": "GAME4ALL Accounts Store — Trust, Security, Speed",
+        "item_tag": "Item",
+    },
+    "fr": {
+        "banner": "HYPER LISTING",
+        "creds": "🔐 Identifiants de livraison sécurisés",
+        "email": "Email",
+        "password": "Mot de passe",
+        "stamp_title": "✅ Révocation des sessions confirmée",
+        "stamp_body": "Toutes les anciennes sessions ont été révoquées et déconnectées à {ts} UTC — prêt à livrer.",
+        "stamp_pending_title": "⏳ Sessions non encore révoquées",
+        "stamp_pending_body": "Lancez l'action Sécuriser et déconnecter les sessions avant de partager cette fiche.",
+        "footer": "GAME4ALL Accounts Store — Confiance, Sécurité, Rapidité",
+        "item_tag": "Article",
+    },
+    "ar": {
+        "banner": "هايبر ليستينغ",
+        "creds": "🔐 بيانات تسليم آمنة",
+        "email": "الإيميل",
+        "password": "كلمة السر",
+        "stamp_title": "✅ تم تأكيد فصل الجلسات",
+        "stamp_body": "تم فصل جميع جلسات الأجهزة القديمة نهائيًا في {ts} UTC — الحساب جاهز للتسليم بأمان.",
+        "stamp_pending_title": "⏳ لم يتم فصل الجلسات بعد",
+        "stamp_pending_body": "قم بتشغيل إجراء تأمين وفصل الجلسات الأمنية قبل مشاركة هذه البطاقة مع الزبون.",
+        "footer": "GAME4ALL Accounts Store — ثقة، أمان، سرعة",
+        "item_tag": "الحساب",
+    },
+}
+
+
+def generate_hyper_listing(
+    *,
+    item_id: int,
+    title: str = "",
+    game: str = "",
+    rank: str = "",
+    extras: str = "",
+    platform: str = "G2G",
+    login_email: str = "",
+    login_password: str = "",
+    secured_at: str = "",
+    lang: str = "en",
+) -> dict[str, Any]:
+    """Hyper-Listing & Secure Telegram Dispatcher.
+
+    Combines a high-converting G2G/Eldorado marketing description with the freshly
+    secured delivery credentials, returning both a Streamlit-ready markdown card and an
+    HTML-formatted payload safe to push straight to the Telegram Bot API.
+    """
+    listing = generate_marketplace_listing(
+        game=game or title,
+        rank=rank,
+        extras=extras,
+        platform=platform,
+        lang=lang,
+    )
+    lang_key = lang if lang in HYPER_LISTING_LABELS else "en"
+    labels = HYPER_LISTING_LABELS[lang_key]
+    market = listing["platform"]
+    display_title = listing["title"]
+    email_value = _norm(login_email) or "—"
+    password_value = _norm(login_password) or "—"
+    is_secured = bool(_norm(secured_at))
+
+    if is_secured:
+        stamp_title = labels["stamp_title"]
+        stamp_body = labels["stamp_body"].format(ts=secured_at)
+    else:
+        stamp_title = labels["stamp_pending_title"]
+        stamp_body = labels["stamp_pending_body"]
+
+    card_lines = [
+        f"### 🌟 {labels['banner']} — {market} 🌟",
+        "",
+        f"**{display_title}**",
+        "",
+        listing["description"],
+        "",
+        "---",
+        "",
+        f"**{labels['creds']}**",
+        f"- {labels['email']}: `{email_value}`",
+        f"- {labels['password']}: `{password_value}`",
+        "",
+        f"**{stamp_title}**",
+        stamp_body,
+        "",
+        "---",
+        f"🆔 {labels['item_tag']} `#{item_id}` · {labels['footer']}",
+    ]
+    card_markdown = "\n".join(card_lines)
+
+    telegram_lines = [
+        f"🌟 <b>{_html_escape(labels['banner'])} — {_html_escape(market)}</b> 🌟",
+        "",
+        f"<b>{_html_escape(display_title)}</b>",
+        "",
+        _html_escape(listing["description"]),
+        "",
+        f"<b>{_html_escape(labels['creds'])}</b>",
+        f"{_html_escape(labels['email'])}: <code>{_html_escape(email_value)}</code>",
+        f"{_html_escape(labels['password'])}: <code>{_html_escape(password_value)}</code>",
+        "",
+        f"<b>{_html_escape(stamp_title)}</b>",
+        _html_escape(stamp_body),
+        "",
+        f"🆔 {_html_escape(labels['item_tag'])} <code>#{item_id}</code> · {_html_escape(labels['footer'])}",
+    ]
+    telegram_html = "\n".join(telegram_lines)
+
+    return {
+        "title": display_title,
+        "description": listing["description"],
+        "card_markdown": card_markdown,
+        "telegram_html": telegram_html,
+        "platform": market,
+        "lang": lang_key,
+        "secured": is_secured,
     }
