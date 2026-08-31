@@ -455,7 +455,7 @@ def seed_demo_licenses() -> None:
         for key, plan, note in DEMO_KEYS:
             conn.execute(
                 """
-                INSERT INTO licenses
+                INSERT OR IGNORE INTO licenses
                     (license_key, key_hash, plan, status, note, issued_at, expires_at, activated_at)
                 VALUES (?, ?, ?, 'active', ?, ?, ?, '')
                 """,
