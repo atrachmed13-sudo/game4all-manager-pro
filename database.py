@@ -35,6 +35,8 @@ INVENTORY_COLUMNS = [
     "status",
     "login_email",
     "login_password",
+    "security_status",
+    "sessions_revoked_at",
     "notes",
     "created_at",
     "updated_at",
@@ -112,6 +114,8 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'Available',
                 login_email TEXT NOT NULL DEFAULT '',
                 login_password TEXT NOT NULL DEFAULT '',
+                security_status TEXT NOT NULL DEFAULT 'Unlocked',
+                sessions_revoked_at TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -123,6 +127,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE inventory ADD COLUMN login_email TEXT NOT NULL DEFAULT ''")
         if "login_password" not in existing:
             conn.execute("ALTER TABLE inventory ADD COLUMN login_password TEXT NOT NULL DEFAULT ''")
+        if "security_status" not in existing:
+            conn.execute("ALTER TABLE inventory ADD COLUMN security_status TEXT NOT NULL DEFAULT 'Unlocked'")
+        if "sessions_revoked_at" not in existing:
+            conn.execute("ALTER TABLE inventory ADD COLUMN sessions_revoked_at TEXT NOT NULL DEFAULT ''")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sales (
@@ -352,6 +360,28 @@ def bulk_set_status(item_ids: list[int], status: str) -> int:
     return len(item_ids)
 
 
+def secure_and_revoke_sessions(item_ids: list[int]) -> int:
+    """Lock the security flag and stamp a session-revocation timestamp for the given accounts.
+
+    Used by the "تأمين وفصل الجلسات الأمنية" (Secure & Unlink Sessions) action so an account's
+    old device sessions are marked as cut off after handover to a new owner.
+    """
+    if not item_ids:
+        return 0
+    now = _utc_now()
+    with get_connection() as conn:
+        conn.executemany(
+            """
+            UPDATE inventory
+            SET security_status = 'Secured', sessions_revoked_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            [(now, now, item_id) for item_id in item_ids],
+        )
+        conn.commit()
+    return len(item_ids)
+
+
 def record_sale(
     *,
     inventory_id: int | None,
@@ -455,7 +485,7 @@ def seed_demo_licenses() -> None:
         for key, plan, note in DEMO_KEYS:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO
+                INSERT OR IGNORE INTO licenses
                     (license_key, key_hash, plan, status, note, issued_at, expires_at, activated_at)
                 VALUES (?, ?, ?, 'active', ?, ?, ?, '')
                 """,

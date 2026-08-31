@@ -1491,6 +1491,48 @@ def parse_uploaded_pack(raw: str, filename: str) -> dict:
     return parsed
 
 
+def render_security_action() -> None:
+    """Let the seller revoke old device sessions and lock the security flag on a delivered account."""
+    st.subheader(tr("security_action_title"))
+    st.caption(tr("security_action_help"))
+
+    accounts = db.inventory_frame()
+    if accounts.empty:
+        st.info(tr("security_action_empty"))
+        return
+
+    options = [0] + [int(v) for v in accounts["id"].tolist()]
+    labels = {0: tr("security_action_none")}
+    for _, row in accounts.iterrows():
+        item_id = int(row["id"])
+        secured = str(row.get("security_status") or "Unlocked") == "Secured"
+        badge = tr("security_status_secured") if secured else tr("security_status_unlocked")
+        email = str(row.get("login_email") or "").strip() or "—"
+        title = row.get("title") or row.get("game") or "Account"
+        labels[item_id] = f"#{item_id} · {title} · {email} · {badge}"
+
+    sel_col, btn_col = st.columns([2, 1])
+    with sel_col:
+        chosen_id = st.selectbox(
+            tr("security_action_select"),
+            options=options,
+            format_func=lambda v: labels.get(v, str(v)),
+            key="security_target_id",
+        )
+    with btn_col:
+        st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
+        if st.button(
+            tr("security_action_button"),
+            type="primary",
+            width="stretch",
+            disabled=not chosen_id,
+            key="security_action_apply",
+        ):
+            db.secure_and_revoke_sessions([int(chosen_id)])
+            flash("success", tr("security_action_success", id=int(chosen_id)))
+            st.rerun()
+
+
 def tab_inventory() -> None:
     counts = db.inventory_counts()
     m1, m2, m3, m4 = st.columns(4)
@@ -1559,6 +1601,9 @@ def tab_inventory() -> None:
             st.rerun()
     elif uploaded is not None:
         st.info(tr("parse_empty"))
+
+    st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
+    render_security_action()
 
     packs = ["All", *db.list_packs()]
     games = ["All", *db.list_games()]
