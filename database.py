@@ -78,6 +78,30 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+# Older builds of this app auto-seeded a demo pack (12 rows from
+# sample_data/batch_pack_example.csv) tagged with one of these pack_id spellings the very
+# first time the app ran. That auto-seeding code has been removed, but any database file
+# created before the removal still has those rows sitting on disk. This module now never
+# inserts sample/mock inventory itself; _purge_legacy_sample_inventory() only ever deletes
+# rows matching the old seeder's own tags so a pre-existing install ends up just as empty
+# as a brand new one.
+_LEGACY_SAMPLE_PACK_PATTERNS = ("%SAMPLE-PACK%", "%SAMPLE_PACK%")
+
+
+def _purge_legacy_sample_inventory(conn: sqlite3.Connection) -> int:
+    """Delete any inventory rows left over from the removed auto-seeded demo pack.
+
+    Safe to run on every startup: it is a no-op once a database has already been cleaned,
+    and it never touches rows that were genuinely imported by a user (those use pack ids
+    like ``PACK-<timestamp>`` or a custom name, never ``SAMPLE-PACK``/``G4A-SAMPLE-PACK-…``).
+    """
+    removed = 0
+    for pattern in _LEGACY_SAMPLE_PACK_PATTERNS:
+        cursor = conn.execute("DELETE FROM inventory WHERE UPPER(pack_id) LIKE ?", (pattern,))
+        removed += cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+    return removed
+
+
 def init_db() -> None:
     with get_connection() as conn:
         conn.execute(
@@ -117,6 +141,7 @@ def init_db() -> None:
             conn.execute("ALTER TABLE inventory ADD COLUMN security_status TEXT NOT NULL DEFAULT 'Unlocked'")
         if "sessions_revoked_at" not in existing:
             conn.execute("ALTER TABLE inventory ADD COLUMN sessions_revoked_at TEXT NOT NULL DEFAULT ''")
+        _purge_legacy_sample_inventory(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sales (
