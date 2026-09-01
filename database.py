@@ -78,20 +78,6 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
-def seed_sample_if_empty() -> None:
-    """Load the example pack once so the desk is usable on first launch."""
-    if inventory_counts()["total"] > 0:
-        return
-    sample = Path(__file__).resolve().parent / "sample_data" / "batch_pack_example.csv"
-    if not sample.exists():
-        return
-    from parser import parse_batch_text
-
-    parsed = parse_batch_text(sample.read_text(encoding="utf-8"), sample.name)
-    if parsed["rows"]:
-        insert_listings(parsed["rows"], "SAMPLE-PACK")
-
-
 def init_db() -> None:
     with get_connection() as conn:
         conn.execute(

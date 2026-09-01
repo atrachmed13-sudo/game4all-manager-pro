@@ -779,6 +779,25 @@ def init_auth_gate() -> None:
         st.session_state.licensed = bool(st.session_state.authenticated)
 
 
+def sync_inventory_state() -> pd.DataFrame:
+    """Initialize and refresh the session-level inventory mirror.
+
+    ``df_inventory`` / ``pack_uploaded`` start clean (empty frame, False) on a brand new
+    session and only flip on once a real batch pack has been parsed and imported — the app
+    ships with zero default or dummy data.
+    """
+    if "df_inventory" not in st.session_state:
+        st.session_state.df_inventory = pd.DataFrame()
+    if "pack_uploaded" not in st.session_state:
+        st.session_state.pack_uploaded = False
+
+    frame = db.inventory_frame()
+    st.session_state.df_inventory = frame
+    if not frame.empty:
+        st.session_state.pack_uploaded = True
+    return frame
+
+
 def is_authenticated() -> bool:
     return bool(st.session_state.get("authenticated", False))
 
@@ -1532,8 +1551,8 @@ def render_security_action() -> None:
     st.subheader(tr("security_action_title"))
     st.caption(tr("security_action_help"))
 
-    accounts = db.inventory_frame()
-    if accounts.empty:
+    accounts = st.session_state.get("df_inventory", pd.DataFrame())
+    if accounts is None or accounts.empty:
         st.info(tr("security_action_empty"))
         return
 
@@ -1612,8 +1631,27 @@ def render_security_action() -> None:
         st.rerun()
 
 
+def inventory_metrics_from_state(df_inventory: pd.DataFrame) -> dict[str, int]:
+    """Count Total/Available/Listed/Sold strictly from the session inventory mirror.
+
+    Returns all zeros whenever ``df_inventory`` is empty — no dummy defaults are ever shown.
+    """
+    if df_inventory is None or df_inventory.empty or "status" not in df_inventory.columns:
+        return {"total": 0, "Available": 0, "Listed": 0, "Sold": 0}
+    status_col = df_inventory["status"]
+    return {
+        "total": int(len(df_inventory)),
+        "Available": int((status_col == "Available").sum()),
+        "Listed": int((status_col == "Listed").sum()),
+        "Sold": int((status_col == "Sold").sum()),
+    }
+
+
 def tab_inventory() -> None:
-    counts = db.inventory_counts()
+    if "df_inventory" not in st.session_state:
+        st.session_state.df_inventory = pd.DataFrame()
+    df_inventory = st.session_state.df_inventory
+    counts = inventory_metrics_from_state(df_inventory)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric(tr("stock_total"), counts["total"])
     m2.metric(tr("stock_available"), counts["Available"])
@@ -1676,26 +1714,37 @@ def tab_inventory() -> None:
             n = db.insert_listings(preview, pack_name.strip() or "PACK")
             st.session_state.preview_rows = []
             st.session_state.preview_imported = 0
+            st.session_state.df_inventory = db.inventory_frame()
+            st.session_state.pack_uploaded = True
             flash("success", tr("imported_ok", n=n, pack=pack_name))
             st.rerun()
     elif uploaded is not None:
         st.info(tr("parse_empty"))
 
+    df_inventory = st.session_state.df_inventory
+    if df_inventory is None or df_inventory.empty:
+        st.info(tr("empty_stock"))
+        return
+
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
     render_security_action()
 
-    packs = ["All", *db.list_packs()]
-    games = ["All", *db.list_games()]
+    packs = ["All", *sorted({str(v) for v in df_inventory.get("pack_id", pd.Series(dtype=str)) if str(v).strip()})]
+    games = ["All", *sorted({str(v) for v in df_inventory.get("game", pd.Series(dtype=str)) if str(v).strip()})]
     f1, f2, f3 = st.columns(3)
     pack_filter = f1.selectbox(tr("pack_filter"), packs)
     status_filter = f2.selectbox(tr("status_filter"), ["All", "Available", "Listed", "Sold"])
     game_filter = f3.selectbox(tr("game_filter"), games)
 
-    frame = db.inventory_frame(
-        status=None if status_filter == "All" else status_filter,
-        pack_id=None if pack_filter == "All" else pack_filter,
-        game=None if game_filter == "All" else game_filter,
-    )
+    frame = df_inventory.copy()
+    if pack_filter != "All" and "pack_id" in frame.columns:
+        frame = frame[frame["pack_id"].astype(str) == pack_filter]
+    if status_filter != "All" and "status" in frame.columns:
+        frame = frame[frame["status"].astype(str) == status_filter]
+    if game_filter != "All" and "game" in frame.columns:
+        frame = frame[frame["game"].astype(str) == game_filter]
+    if "id" in frame.columns:
+        frame = frame.sort_values("id", ascending=False)
     if frame.empty:
         st.info(tr("empty_stock"))
         return
@@ -2154,7 +2203,6 @@ def tab_sales() -> None:
 
 
 def render_dashboard() -> None:
-    db.seed_sample_if_empty()
     sidebar()
     inject_theme_runtime(current_theme(), bool(st.session_state.get("sound_enabled", True)))
     inject_direction(st.session_state.lang)
@@ -2208,6 +2256,7 @@ def main() -> None:
         st.session_state.authenticated = False
     init_auth_gate()
     db.init_db()
+    sync_inventory_state()
     if "lang" not in st.session_state:
         st.session_state.lang = "en"
     if "theme_select" not in st.session_state:
