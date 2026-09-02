@@ -94,10 +94,24 @@ def _purge_legacy_sample_inventory(conn: sqlite3.Connection) -> int:
     Safe to run on every startup: it is a no-op once a database has already been cleaned,
     and it never touches rows that were genuinely imported by a user (those use pack ids
     like ``PACK-<timestamp>`` or a custom name, never ``SAMPLE-PACK``/``G4A-SAMPLE-PACK-…``).
+
+    A real sale can end up referencing one of these legacy demo rows via
+    ``sales.inventory_id`` (recorded before this cleanup existed). With
+    ``PRAGMA foreign_keys = ON`` a plain DELETE on the parent row would then raise
+    ``sqlite3.IntegrityError: FOREIGN KEY constraint failed`` and crash the app on every
+    startup, so any such sale is first unlinked (``inventory_id`` set to NULL) — the sale
+    record itself, and its profit/ROI numbers, are kept intact.
     """
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     removed = 0
     for pattern in _LEGACY_SAMPLE_PACK_PATTERNS:
-        cursor = conn.execute("DELETE FROM inventory WHERE UPPER(pack_id) LIKE ?", (pattern,))
+        ids = [row[0] for row in conn.execute("SELECT id FROM inventory WHERE UPPER(pack_id) LIKE ?", (pattern,)).fetchall()]
+        if not ids:
+            continue
+        placeholders = ",".join("?" for _ in ids)
+        if "sales" in tables:
+            conn.execute(f"UPDATE sales SET inventory_id = NULL WHERE inventory_id IN ({placeholders})", ids)
+        cursor = conn.execute(f"DELETE FROM inventory WHERE id IN ({placeholders})", ids)
         removed += cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
     return removed
 
