@@ -1073,8 +1073,10 @@ def init_crm_state() -> None:
     if "real_orders" not in st.session_state:
         st.session_state.real_orders = []
     if "crm_platform" not in st.session_state:
-        saved = db.get_setting("default_platform", "G2G") or "G2G"
-        st.session_state.crm_platform = saved if saved in CRM_PLATFORMS else "G2G"
+        # Only pre-select a platform if the seller genuinely saved one before — a brand
+        # new session starts unselected instead of silently defaulting to "G2G".
+        saved = db.get_setting("default_platform", "") or ""
+        st.session_state.crm_platform = saved if saved in CRM_PLATFORMS else None
     if "crm_order_id" not in st.session_state:
         st.session_state.crm_order_id = ""
     if "crm_buyer_name" not in st.session_state:
@@ -1249,12 +1251,14 @@ def tab_customers_delivery() -> None:
             platform = st.selectbox(
                 tr("crm_platform_label"),
                 options=list(CRM_PLATFORMS),
+                index=None,
+                placeholder=tr("crm_platform_placeholder"),
                 key="crm_platform",
             )
-            st.text_input(tr("crm_order_id_label"), key="crm_order_id", placeholder="G2G-123456")
+            st.text_input(tr("crm_order_id_label"), key="crm_order_id")
         with right:
-            st.text_input(tr("crm_buyer_label"), key="crm_buyer_name", placeholder="Ahmed / Alex")
-            st.text_input(tr("crm_product_label"), key="crm_product_name", placeholder="Valorant Immortal EU")
+            st.text_input(tr("crm_buyer_label"), key="crm_buyer_name")
+            st.text_input(tr("crm_product_label"), key="crm_product_name")
     if platform in PLATFORMS:
         db.set_setting("default_platform", platform)
         st.session_state.default_platform = platform
@@ -2125,18 +2129,21 @@ def tab_sales() -> None:
 
     if mode == tr("sale_manual"):
         r1, r2, r3 = st.columns(3)
-        title = r1.text_input(tr("col_title"), value="GAME4ALL listing")
-        game = r2.text_input(tr("col_game"), value="Valorant")
+        title = r1.text_input(tr("col_title"), value="")
+        game = r2.text_input(tr("col_game"), value="")
         platform = r3.selectbox(tr("col_platform"), list(PLATFORMS), key="sale_platform")
-        cost = st.number_input(tr("calc_cost"), min_value=0.0, value=15.0, step=0.5, key="sale_cost")
+        cost = st.number_input(tr("calc_cost"), min_value=0.0, value=0.0, step=0.5, key="sale_cost")
 
     profile = get_platform_profile(platform)
     s1, s2, s3 = st.columns(3)
-    sold_price = s1.number_input(tr("sold_price"), min_value=0.0, value=float(list_price or 29.9), step=0.5)
+    sold_price = s1.number_input(tr("sold_price"), min_value=0.0, value=float(list_price or 0.0), step=0.5)
     commission = s2.number_input(tr("calc_commission"), min_value=0.0, value=float(profile["commission_pct"]), step=0.1, key="sale_commission")
     extra_fees = s3.number_input(tr("calc_fees"), min_value=0.0, value=float(profile["extra_fees"]), step=0.1, key="sale_fees")
     deal = calculate_deal(cost, sold_price, commission, extra_fees, platform=platform)
-    st.caption(f"{tr('metric_profit')}: {money(deal['net_profit'])} · {tr('metric_roi')}: {deal['roi_pct']:.1f}%")
+    if cost > 0 and sold_price > 0:
+        st.caption(f"{tr('metric_profit')}: {money(deal['net_profit'])} · {tr('metric_roi')}: {deal['roi_pct']:.1f}%")
+    else:
+        st.caption(tr("sale_awaiting_input"))
 
     if st.button(tr("record_sale"), type="primary"):
         db.record_sale(
