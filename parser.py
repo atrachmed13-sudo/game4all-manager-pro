@@ -105,7 +105,26 @@ RANKS = (
     "Rank Ready",
 )
 
-SERVERS = ("EU", "NA", "LATAM", "BR", "AP", "KR", "OCE", "TR", "MENA", "SEA")
+SERVERS = (
+    "EUW",
+    "EUNE",
+    "NAE",
+    "NAW",
+    "EU",
+    "NA",
+    "LATAM",
+    "LAN",
+    "LAS",
+    "BR",
+    "AP",
+    "KR",
+    "JP",
+    "OCE",
+    "TR",
+    "MENA",
+    "SEA",
+    "RU",
+)
 
 EMAIL_LABELS = {
     "full_access": {
@@ -320,7 +339,9 @@ def extract_features(text: str, seed: dict[str, Any] | None = None) -> dict[str,
 
     extras = _norm((seed or {}).get("extras"))
     extra_hits = re.findall(
-        r"\b(?:battle pass|vbucks|v-bucks|rp|points|unlinked|no ban|no bans|full access|original email|2fa|warranty)\b",
+        r"\b(?:battle pass|vbucks|v-bucks|rp|points|unlinked|no ban|no bans|full access|"
+        r"original email|unverified email|verified email|instant delivery|manual delivery|"
+        r"2fa|warranty|rank ready|smurf)\b",
         source,
         re.IGNORECASE,
     )

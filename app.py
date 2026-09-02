@@ -1523,65 +1523,94 @@ def tab_listing_generator() -> None:
         if not matches.empty:
             picked_row = matches.iloc[0].to_dict()
 
-    default_game = str(picked_row.get("game") or "") if picked_row else ""
-    default_rank = _listing_rank_default(picked_row) if picked_row else ""
-    default_extras = _listing_features_default(picked_row) if picked_row else ""
-    default_platform = str((picked_row or {}).get("platform") or "")
-    platform_options = list(LISTING_PLATFORMS)
-    platform_index = platform_options.index(default_platform) if default_platform in platform_options else 0
+    if picked_row:
+        # Zero-manual path: every field the marketplace copy needs is derived straight from
+        # the inventory row (plus a smart-text pass over its own notes/title to fill any
+        # gaps), so no form, dropdown override, or Generate click is required — the title
+        # and sales copy render instantly the moment an account is picked.
+        parsed = extract_features(str(picked_row.get("notes") or ""), picked_row)
+        st.session_state.current_parsed_account = parsed
 
-    # Keying every field on the picked account id forces Streamlit to treat them as brand
-    # new widgets whenever the selection changes, so the auto-filled values above actually
-    # take effect instead of being shadowed by whatever was previously typed.
-    field_key = int(picked_id or 0)
-    with st.form(f"listing_generator_form_{field_key}"):
-        game = st.text_input(
-            tr("listing_game"),
-            value=default_game,
-            placeholder="Valorant / Fortnite / League of Legends",
-            key=f"listing_game_{field_key}",
-        )
-        rank = st.text_input(
-            tr("listing_rank"),
-            value=default_rank,
-            placeholder="Immortal 3 / Champion / Level 200",
-            key=f"listing_rank_{field_key}",
-        )
-        delivery_key = st.selectbox(
-            tr("listing_delivery"),
-            options=delivery_keys,
-            format_func=lambda key: tr(DELIVERY_I18N.get(key, key)),
-            key=f"listing_delivery_{field_key}",
-        )
-        extras = st.text_area(
-            tr("listing_features"),
-            value=default_extras,
-            placeholder="Full Access, rare skins, original email, ranked ready…",
-            height=110,
-            key=f"listing_extras_{field_key}",
-        )
-        platform = st.selectbox(
-            tr("listing_platform"),
-            options=platform_options,
-            index=platform_index,
-            key=f"listing_platform_{field_key}",
-        )
-        generated = st.form_submit_button(tr("listing_generate"), type="primary", width="stretch")
+        game = parsed.get("game") or str(picked_row.get("game") or "")
+        rank = _listing_rank_default(picked_row) or parsed.get("rank") or ""
+        extras = _listing_features_default(picked_row) or parsed.get("extras") or ""
+        platform = str(picked_row.get("platform") or "G2G")
+        if platform not in LISTING_PLATFORMS:
+            platform = "G2G"
+        delivery_label = tr(DELIVERY_I18N.get("instant", "instant"))
 
-    if generated:
-        if not str(game or "").strip():
-            st.warning(tr("listing_need_game"))
-        else:
-            pack = generate_marketplace_listing(
-                game=game,
-                rank=rank,
-                delivery_label=tr(DELIVERY_I18N.get(delivery_key, delivery_key)),
-                extras=extras,
-                platform=platform,
-                lang=st.session_state.get("lang", "en"),
+        st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(f"**{tr('listing_auto_title')}**")
+            st.caption(tr("listing_auto_help"))
+            render_cards(feature_cards(parsed))
+
+        st.session_state.listing_pack = generate_marketplace_listing(
+            game=game,
+            rank=rank,
+            delivery_label=delivery_label,
+            extras=extras,
+            platform=platform,
+            lang=st.session_state.get("lang", "en"),
+        )
+        st.session_state.listing_pack_kind = f"auto:{picked_id}"
+    else:
+        # No account picked (Manual Entry) — nothing to auto-derive from, so fall back to a
+        # plain typed form.
+        with st.form("listing_generator_form_manual"):
+            game = st.text_input(
+                tr("listing_game"),
+                value="",
+                placeholder="Valorant / Fortnite / League of Legends",
+                key="listing_game_manual",
             )
-            st.session_state.listing_pack = pack
-            st.success(tr("listing_ok"))
+            rank = st.text_input(
+                tr("listing_rank"),
+                value="",
+                placeholder="Immortal 3 / Champion / Level 200",
+                key="listing_rank_manual",
+            )
+            delivery_key = st.selectbox(
+                tr("listing_delivery"),
+                options=delivery_keys,
+                format_func=lambda key: tr(DELIVERY_I18N.get(key, key)),
+                key="listing_delivery_manual",
+            )
+            extras = st.text_area(
+                tr("listing_features"),
+                value="",
+                placeholder="Full Access, rare skins, original email, ranked ready…",
+                height=110,
+                key="listing_extras_manual",
+            )
+            platform = st.selectbox(
+                tr("listing_platform"),
+                options=list(LISTING_PLATFORMS),
+                index=0,
+                key="listing_platform_manual",
+            )
+            generated = st.form_submit_button(tr("listing_generate"), type="primary", width="stretch")
+
+        if generated:
+            if not str(game or "").strip():
+                st.warning(tr("listing_need_game"))
+            else:
+                pack = generate_marketplace_listing(
+                    game=game,
+                    rank=rank,
+                    delivery_label=tr(DELIVERY_I18N.get(delivery_key, delivery_key)),
+                    extras=extras,
+                    platform=platform,
+                    lang=st.session_state.get("lang", "en"),
+                )
+                st.session_state.listing_pack = pack
+                st.session_state.listing_pack_kind = "manual"
+                st.success(tr("listing_ok"))
+        elif st.session_state.get("listing_pack_kind") != "manual":
+            # Switching back to Manual Entry without generating yet — drop any leftover
+            # auto-listing from a previously picked account instead of showing stale copy.
+            st.session_state.pop("listing_pack", None)
+            st.session_state.pop("listing_pack_kind", None)
 
     pack = st.session_state.get("listing_pack")
     if not pack:
@@ -1933,6 +1962,7 @@ def listing_to_features(row: dict) -> dict[str, str]:
 
 def tab_parser() -> None:
     st.subheader(tr("parser_title"))
+    st.caption(tr("parser_live_hint"))
     stock = db.inventory_frame()
     options = [0]
     labels = {0: tr("parser_none")}
@@ -1975,24 +2005,22 @@ def tab_parser() -> None:
             warranty = int(st.number_input(tr("warranty"), min_value=1, max_value=168, value=12, step=1))
 
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
-    a1, a2 = st.columns(2, gap="large")
-    extract_clicked = a1.button(tr("extract_btn"), width="stretch")
-    generate_clicked = a2.button(tr("generate_btn"), type="primary", width="stretch")
-    st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
 
-    if extract_clicked or generate_clicked or seed:
+    # Fully automatic: as soon as there is pasted text or a picked stock row, features and
+    # sales copy are extracted/generated on every rerun — no Extract/Generate click required.
+    has_input = bool(str(pasted or "").strip()) or bool(seed)
+    features: dict[str, str] = {}
+    if has_input:
         features = extract_features(pasted, seed)
         st.session_state.features = features
-    features = st.session_state.get("features") or {}
+        st.session_state.current_parsed_account = features
+
     with st.container(border=True):
         st.markdown(f"**{tr('features_card')}**")
         st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
         render_cards(feature_cards(features))
 
-    if generate_clicked:
-        if not features:
-            st.info(tr("no_features"))
-            return
+    if has_input and features:
         copy = generate_sales_copy(
             features,
             platform=platform,
@@ -2001,6 +2029,8 @@ def tab_parser() -> None:
             warranty_h=warranty,
         )
         st.session_state.generated_copy = copy
+    else:
+        st.session_state.pop("generated_copy", None)
 
     copy = st.session_state.get("generated_copy")
     if copy:
