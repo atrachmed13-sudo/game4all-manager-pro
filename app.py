@@ -2128,7 +2128,20 @@ def tab_parser() -> None:
                 for k in ("title", "game", "rank", "level", "skins", "emotes", "server", "extras", "notes")
                 if seed.get(k)
             )
-        pasted = st.text_area(tr("parser_paste"), value=default_text, height=200)
+        # Keyed per picked account so switching accounts always resets this box cleanly —
+        # never leaves behind a previous account's stale text. It's a read-only preview
+        # once an account is active: extract_features() ignores this box's contents
+        # whenever a seed is present and reads the account's own stored attributes
+        # instead, so leftover/unrelated text here can never contaminate the real details.
+        pasted = st.text_area(
+            tr("parser_paste"),
+            value=default_text,
+            height=200,
+            key=f"parser_pasted_{pick}",
+            disabled=bool(seed),
+        )
+        if seed:
+            st.caption(tr("parser_account_locked_hint"))
 
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
     with st.container(border=True):

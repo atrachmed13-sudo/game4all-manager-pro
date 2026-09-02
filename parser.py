@@ -284,14 +284,23 @@ def _blank_listing() -> dict[str, Any]:
 
 
 def extract_features(text: str, seed: dict[str, Any] | None = None) -> dict[str, str]:
-    """Pull rank / skins / emotes / level / region out of free text."""
+    """Pull rank / skins / emotes / level / region out of an active account's own stored
+    attributes first; fall back to free-typed text only when there's no account context.
+
+    When ``seed`` (a picked inventory row) is present, every regex fallback below scans
+    the seed's *own* blob only — never the raw ``text`` box. This is deliberate: the raw
+    paste box may still contain stale or unrelated text left over from a previously
+    picked account (or the seller's own scratch notes), and mixing it into the scan would
+    let a leftover match (e.g. a different account's rank/skins) silently override the
+    real, trusted details of the account that's actually active. With no seed at all
+    (pure manual paste), the raw text is the only source there is.
+    """
     if seed:
-        blob = " | ".join(
+        source = " | ".join(
             _norm(seed.get(k))
             for k in ("title", "game", "rank", "level", "skins", "emotes", "extras", "server", "notes")
             if _norm(seed.get(k))
         )
-        source = f"{blob} | {text}" if text else blob
     else:
         source = text or ""
 
@@ -348,7 +357,20 @@ def extract_features(text: str, seed: dict[str, Any] | None = None) -> dict[str,
         source,
         re.IGNORECASE,
     )
-    extra_joined = ", ".join(dict.fromkeys(hit.strip() for hit in extra_hits))
+    # Only append a regex hit if it isn't already covered by the seed's own extras text —
+    # otherwise a keyword the account already lists (e.g. "Smurf") gets tacked on a second
+    # time just because the same word also appears in the blob it was pulled from.
+    existing_lower = extras.lower()
+    seen_lower: set[str] = set()
+    new_hits: list[str] = []
+    for hit in extra_hits:
+        clean = hit.strip()
+        clean_lower = clean.lower()
+        if not clean or clean_lower in seen_lower or clean_lower in existing_lower:
+            continue
+        seen_lower.add(clean_lower)
+        new_hits.append(clean)
+    extra_joined = ", ".join(new_hits)
     if extra_joined:
         extras = ", ".join(part for part in (extras, extra_joined) if part)
 
