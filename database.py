@@ -116,6 +116,48 @@ def _purge_legacy_sample_inventory(conn: sqlite3.Connection) -> int:
     return removed
 
 
+def _backfill_missing_features(conn: sqlite3.Connection) -> int:
+    """Re-derive game/rank/level/server/extras for rows that were saved with a blank
+    ``game`` — e.g. imported before a parser fix mangled a compact pipe-delimited combo
+    line. Runs the same smart-text extraction the parser uses on the row's own
+    title/notes, so a previously-corrupted import self-heals without a re-upload, and the
+    listing generator never has to fall back to a generic placeholder.
+    """
+    from parser import extract_features
+
+    rows = conn.execute(
+        "SELECT id, title, game, rank, level, skins, emotes, extras, server, notes FROM inventory WHERE TRIM(game) = ''"
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        seed = dict(row)
+        features = extract_features(str(seed.get("notes") or seed.get("title") or ""), seed)
+        game = str(features.get("game") or "").strip()
+        if not game:
+            continue
+        conn.execute(
+            """
+            UPDATE inventory SET
+                game = ?,
+                rank = CASE WHEN TRIM(rank) = '' THEN ? ELSE rank END,
+                level = CASE WHEN TRIM(level) = '' THEN ? ELSE level END,
+                server = CASE WHEN TRIM(server) = '' THEN ? ELSE server END,
+                extras = CASE WHEN TRIM(extras) = '' THEN ? ELSE extras END
+            WHERE id = ?
+            """,
+            (
+                game,
+                str(features.get("rank") or ""),
+                str(features.get("level") or ""),
+                str(features.get("server") or ""),
+                str(features.get("extras") or ""),
+                seed["id"],
+            ),
+        )
+        updated += 1
+    return updated
+
+
 def init_db() -> None:
     with get_connection() as conn:
         conn.execute(
@@ -156,6 +198,7 @@ def init_db() -> None:
         if "sessions_revoked_at" not in existing:
             conn.execute("ALTER TABLE inventory ADD COLUMN sessions_revoked_at TEXT NOT NULL DEFAULT ''")
         _purge_legacy_sample_inventory(conn)
+        _backfill_missing_features(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sales (

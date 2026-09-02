@@ -15,9 +15,12 @@ from typing import Any
 from pricing import PLATFORMS, get_platform_profile
 
 # email:password (and close variants) — imported as delivery logins, never authenticated here.
+# The local part (before @) also stops at | ; , so a compact pipe/semicolon-delimited line
+# like "League of Legends|EUW|Smurf|Full Access|buyer@mail.com:pass" never bleeds the
+# previous field ("...Access") into the email, corrupting game/rank/extras downstream.
 # Password stops at whitespace / | / ; / / so listing fields after a combo stay separate.
 COMBO_IN_TEXT = re.compile(
-    r"([^\s@]+@[^\s@]+\.[A-Za-z0-9.-]+)[:|;/\t]([^\s|;/]+)",
+    r"([^\s@|;,]+@[^\s@]+\.[A-Za-z0-9.-]+)[:|;/\t]([^\s|;/]+)",
     re.IGNORECASE,
 )
 CREDENTIAL_LINE = re.compile(
@@ -632,6 +635,7 @@ def generate_marketplace_listing(
     *,
     game: str,
     rank: str = "",
+    server: str = "",
     delivery_label: str = "",
     extras: str = "",
     platform: str = "G2G",
@@ -643,31 +647,39 @@ def generate_marketplace_listing(
     market = platform if platform in LISTING_PLATFORMS else "G2G"
     game_name = _norm(game) or "Premium Game Account"
     rank_name = _norm(rank) or pack["rank_fallback"]
+    region_name = _norm(server)
+    # Reflect the real region/server in the headline whenever it's known (e.g. "League of
+    # Legends EUW Smurf") instead of silently dropping it from the generated copy.
+    game_region = f"{game_name} {region_name}".strip() if region_name else game_name
     extras_text = _norm(extras) or EMAIL_LABELS["full_access"][lang_key]
     delivery = _norm(delivery_label) or pack["hook"].get(market, pack["hook"]["G2G"]).split("•")[0].strip()
     hook = pack["hook"].get(market) or pack["hook"]["G2G"]
     feature_bit = extras_text.split(",")[0].strip()[:42] or "Full Access"
 
     if market == "G2G":
-        title = f"{game_name} {rank_name} | {delivery} | {feature_bit}"
+        title = f"{game_region} {rank_name} | {delivery} | {feature_bit}"
     elif market == "Eldorado":
-        title = f"{game_name} {rank_name} Account — {feature_bit} — {delivery}"
+        title = f"{game_region} {rank_name} Account — {feature_bit} — {delivery}"
     elif market == "FanPay":
-        title = f"{game_name} | {rank_name} | {feature_bit} | GAME4ALL"
+        title = f"{game_region} | {rank_name} | {feature_bit} | GAME4ALL"
     else:
-        title = f"{game_name} {rank_name} — {delivery} — Ready to Play"
+        title = f"{game_region} {rank_name} — {delivery} — Ready to Play"
 
     title = re.sub(r"\s+", " ", title).strip()[:120]
 
     labels = {
-        "en": ("Game", "Rank / level", "Delivery", "Features", "Email access", "Warranty"),
-        "fr": ("Jeu", "Rang / niveau", "Livraison", "Extras", "Accès e-mail", "Garantie"),
-        "ar": ("اللعبة", "الرانك / المستوى", "التسليم", "المميزات", "وصول الإيميل", "الضمان"),
+        "en": ("Game", "Region / server", "Rank / level", "Delivery", "Features", "Email access", "Warranty"),
+        "fr": ("Jeu", "Région / serveur", "Rang / niveau", "Livraison", "Extras", "Accès e-mail", "Garantie"),
+        "ar": ("اللعبة", "المنطقة / السيرفر", "الرانك / المستوى", "التسليم", "المميزات", "وصول الإيميل", "الضمان"),
     }
     named = labels.get(lang_key, labels["en"])
-    labeled = list(zip(named, (game_name, rank_name, delivery, extras_text, EMAIL_LABELS["full_access"][lang_key], pack["warranty_text"].format(hours=12))))
+    values = (game_name, region_name, rank_name, delivery, extras_text, EMAIL_LABELS["full_access"][lang_key], pack["warranty_text"].format(hours=12))
+    # Skip the region row entirely when there's nothing to show, rather than printing a
+    # blank/placeholder line in the pasted copy.
+    labeled = [(label, value) for label, value in zip(named, values) if not (label == named[1] and not value)]
 
-    intro = pack["intro"].format(title=f"{game_name} {rank_name}", platform=market)
+    intro_title = re.sub(r"\s+", " ", f"{game_region} {rank_name}").strip()
+    intro = pack["intro"].format(title=intro_title, platform=market)
     html_lines = [
         f"<h3>{hook}</h3>",
         f"<p>{intro}</p>",
@@ -737,6 +749,7 @@ def generate_hyper_listing(
     title: str = "",
     game: str = "",
     rank: str = "",
+    server: str = "",
     extras: str = "",
     platform: str = "G2G",
     login_email: str = "",
@@ -753,6 +766,7 @@ def generate_hyper_listing(
     listing = generate_marketplace_listing(
         game=game or title,
         rank=rank,
+        server=server,
         extras=extras,
         platform=platform,
         lang=lang,

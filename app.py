@@ -1490,7 +1490,10 @@ def _listing_rank_default(row: dict[str, Any]) -> str:
 
 
 def _listing_features_default(row: dict[str, Any]) -> str:
-    bits = [str(row.get(key) or "").strip() for key in ("skins", "emotes", "extras", "server", "notes")]
+    # Server/region gets its own dedicated line in the generated listing (see `server=`
+    # below), and raw `notes` is just the unparsed source text — including either here would
+    # duplicate/clutter the Features bullet instead of showing clean, real details.
+    bits = [str(row.get(key) or "").strip() for key in ("skins", "emotes", "extras")]
     return ", ".join(bit for bit in bits if bit)
 
 
@@ -1533,6 +1536,7 @@ def tab_listing_generator() -> None:
 
         game = parsed.get("game") or str(picked_row.get("game") or "")
         rank = _listing_rank_default(picked_row) or parsed.get("rank") or ""
+        server = str(picked_row.get("server") or "").strip() or parsed.get("server") or ""
         extras = _listing_features_default(picked_row) or parsed.get("extras") or ""
         platform = str(picked_row.get("platform") or "G2G")
         if platform not in LISTING_PLATFORMS:
@@ -1548,6 +1552,7 @@ def tab_listing_generator() -> None:
         st.session_state.listing_pack = generate_marketplace_listing(
             game=game,
             rank=rank,
+            server=server,
             delivery_label=delivery_label,
             extras=extras,
             platform=platform,
@@ -1693,6 +1698,7 @@ def render_security_action() -> None:
                 title=str(secured_row.get("title") or ""),
                 game=str(secured_row.get("game") or ""),
                 rank=str(secured_row.get("rank") or ""),
+                server=str(secured_row.get("server") or ""),
                 extras=extras_text,
                 platform=str(secured_row.get("platform") or "G2G"),
                 login_email=str(secured_row.get("login_email") or ""),
