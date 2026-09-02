@@ -1194,20 +1194,33 @@ def init_crm_state() -> None:
         st.session_state.crm_login_password = ""
 
 
-def bind_crm_delivery_account() -> None:
-    """Fill delivery Email/Password (and product name) from the inventory row just selected."""
-    picked = int(st.session_state.get("crm_delivery_account") or 0)
-    promote_local_pick("crm_delivery_account", picked, rerun=False)
-    if picked <= 0:
-        st.session_state.crm_bound_account = 0
-        return
-    item = db.get_item(picked) or {}
-    st.session_state.crm_login_email = str(item.get("login_email") or "")
-    st.session_state.crm_login_password = str(item.get("login_password") or "")
-    st.session_state.crm_bound_account = picked
-    title = str(item.get("title") or item.get("game") or "").strip()
-    if title:
-        st.session_state.crm_product_name = title
+def resolve_crm_bound_account(accounts: list[dict[str, Any]], account_ids: list[int]) -> dict[str, Any] | None:
+    """Decide which inventory account drives Product Name / Email / Password, and seed
+    those three fields *before any widget in the tab is instantiated*.
+
+    Streamlit raises ``StreamlitAPIException`` (widget-already-instantiated) if you write
+    to a widget-keyed ``session_state`` entry after that widget has already rendered once
+    in the same run. So this never runs as an ``on_change`` callback or a mid-body button
+    handler — it must be the very first thing ``tab_customers_delivery`` does, reading the
+    picker's *previous* value (already updated for this run if the seller just changed it)
+    straight from session_state, without ever touching the picker widget itself.
+    """
+    sync_local_account_picker("crm_delivery_account", set(account_ids))
+    bound_id = int(st.session_state.get("crm_delivery_account") or 0)
+    bound_account = next((row for row in accounts if int(row["id"]) == bound_id), None) if bound_id else None
+
+    seen_key = "_crm_bound_seen"
+    if bound_id == st.session_state.get(seen_key):
+        return bound_account
+    st.session_state[seen_key] = bound_id
+    st.session_state.crm_bound_account = bound_id
+    if bound_account:
+        st.session_state.crm_login_email = str(bound_account.get("login_email") or "")
+        st.session_state.crm_login_password = str(bound_account.get("login_password") or "")
+        title = str(bound_account.get("title") or bound_account.get("game") or "").strip()
+        if title:
+            st.session_state.crm_product_name = title
+    return bound_account
 
 
 def crm_context() -> dict[str, str]:
@@ -1349,6 +1362,13 @@ def sidebar() -> None:
 
 def tab_customers_delivery() -> None:
     init_crm_state()
+
+    # Resolve the bound delivery account — and seed Product Name / Email / Password from
+    # it — before rendering a single widget below. See resolve_crm_bound_account() for why.
+    accounts = db.list_delivery_accounts()
+    account_ids = [0] + [int(row["id"]) for row in accounts]
+    bound_account = resolve_crm_bound_account(accounts, account_ids)
+
     st.markdown(
         f'<p class="g4a-booster-title">{tr("nav_customers")}</p>',
         unsafe_allow_html=True,
@@ -1375,7 +1395,6 @@ def tab_customers_delivery() -> None:
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
     st.markdown(f"**{tr('crm_account_section_title')}**")
     st.caption(tr("crm_account_section_help"))
-    accounts = db.list_delivery_accounts()
     if accounts:
         delivery_grid = pd.DataFrame(accounts)
         grid_cols = [
@@ -1397,26 +1416,22 @@ def tab_customers_delivery() -> None:
         )
     else:
         st.info(tr("crm_no_accounts"))
-    account_ids = [0] + [int(row["id"]) for row in accounts]
     labels = {0: tr("crm_account_none_option")}
     for row in accounts:
         email = str(row.get("login_email") or "").strip() or tr("crm_no_email")
         labels[int(row["id"])] = (
             f"#{row['id']} · {row.get('status') or '—'} · {row.get('title') or row.get('game') or 'Account'} · {email}"
         )
-    sync_local_account_picker("crm_delivery_account", set(account_ids))
     picked_id = st.selectbox(
         tr("crm_delivery_account_label"),
         options=account_ids,
         format_func=lambda item_id: labels.get(int(item_id), str(item_id)),
         key="crm_delivery_account",
-        on_change=bind_crm_delivery_account,
     )
-    if int(st.session_state.get("crm_bound_account") or -1) != int(picked_id or 0):
-        # Covers the case where the picker's value was just force-synced from the global
-        # active account (no on_change fires for a programmatic session_state change).
-        bind_crm_delivery_account()
-    chosen = next((row for row in accounts if int(row["id"]) == int(picked_id)), None)
+    promote_local_pick("crm_delivery_account", picked_id)
+    chosen = bound_account if int(picked_id or 0) == int(st.session_state.get("crm_bound_account") or -1) else next(
+        (row for row in accounts if int(row["id"]) == int(picked_id)), None
+    )
     if st.button(tr("crm_fill_button"), type="primary", width="stretch", key="crm_insert_login"):
         if not chosen:
             st.warning(tr("crm_fill_warning"))
