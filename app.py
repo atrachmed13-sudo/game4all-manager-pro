@@ -1962,15 +1962,16 @@ def tab_pricing() -> None:
         if chosen:
             picked = db.get_item(int(chosen))
 
-    default_cost = float((picked or {}).get("cost") or 15.0)
-    default_sell = float((picked or {}).get("list_price") or 0)
+    # Cost / selling price only ever pre-fill from a real picked inventory item; with no
+    # selection (or a fresh, never-uploaded inventory) both stay at a clean 0.0 instead of
+    # sample placeholder numbers.
+    default_cost = float((picked or {}).get("cost") or 0.0)
+    default_sell = float((picked or {}).get("list_price") or 0.0)
     default_platform = str((picked or {}).get("platform") or st.session_state.get("default_platform") or "G2G")
     if default_platform not in PLATFORMS:
         default_platform = "G2G"
     if picked and default_sell <= 0:
         default_sell = suggested_list_price(picked, default_platform)
-    if default_sell <= 0:
-        default_sell = 29.9
     item_key = int((picked or {}).get("id") or 0)
 
     with st.container(border=True):
@@ -2014,28 +2015,32 @@ def tab_pricing() -> None:
             step=0.1,
             key=f"calc_fees_{platform}",
         )
-    deal = calculate_deal(cost, sell, commission, fees, platform=platform)
+    has_inputs = cost > 0 and sell > 0
+    deal = calculate_deal(cost, sell, commission, fees, platform=platform) if has_inputs else None
 
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
     k1, k2, k3 = st.columns(3, gap="large")
-    k1.metric(tr("metric_commission"), money(deal["commission_amount"]))
-    k2.metric(tr("metric_net"), money(deal["net_received"]))
-    k3.metric(tr("metric_profit"), money(deal["net_profit"]))
+    k1.metric(tr("metric_commission"), money(deal["commission_amount"]) if deal else money(0))
+    k2.metric(tr("metric_net"), money(deal["net_received"]) if deal else money(0))
+    k3.metric(tr("metric_profit"), money(deal["net_profit"]) if deal else money(0))
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
     k4, k5, _ = st.columns(3, gap="large")
-    k4.metric(tr("metric_roi"), f"{deal['roi_pct']:.1f}%")
-    k5.metric(tr("metric_margin"), f"{deal['margin_on_sale']:.1f}%")
+    k4.metric(tr("metric_roi"), f"{deal['roi_pct']:.1f}%" if deal else "—")
+    k5.metric(tr("metric_margin"), f"{deal['margin_on_sale']:.1f}%" if deal else "—")
 
-    heat_key = {"hot": "hot_deal", "thin": "thin_deal", "loss": "loss_deal"}.get(deal["heat"])
-    if heat_key:
-        if deal["heat"] == "hot":
-            st.success(f"{tr(heat_key)} · {profile['note']}")
-        elif deal["heat"] == "loss":
-            st.error(f"{tr(heat_key)} · {profile['note']}")
-        else:
-            st.warning(f"{tr(heat_key)} · {profile['note']}")
+    if not deal:
+        st.caption(tr("calc_awaiting_input"))
     else:
-        st.caption(profile["note"])
+        heat_key = {"hot": "hot_deal", "thin": "thin_deal", "loss": "loss_deal"}.get(deal["heat"])
+        if heat_key:
+            if deal["heat"] == "hot":
+                st.success(f"{tr(heat_key)} · {profile['note']}")
+            elif deal["heat"] == "loss":
+                st.error(f"{tr(heat_key)} · {profile['note']}")
+            else:
+                st.warning(f"{tr(heat_key)} · {profile['note']}")
+        else:
+            st.caption(profile["note"])
 
     if picked:
         st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
@@ -2055,29 +2060,35 @@ def tab_pricing() -> None:
 
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
     with st.container(border=True):
-        target = st.number_input(tr("calc_target"), min_value=0.0, value=8.0, step=0.5)
+        target = st.number_input(tr("calc_target"), min_value=0.0, value=0.0, step=0.5)
         st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
-        suggested = required_sell_price(cost, target, commission, fees)
-        st.metric(tr("calc_suggest"), money(suggested) if suggested == suggested else "—")
+        if cost > 0 and target > 0:
+            suggested = required_sell_price(cost, target, commission, fees)
+            st.metric(tr("calc_suggest"), money(suggested) if suggested == suggested else "—")
+        else:
+            st.metric(tr("calc_suggest"), "—")
 
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
     st.markdown(f"**{tr('compare_title')}**")
-    compare = pd.DataFrame(compare_platforms(cost, sell))
-    show = compare[
-        ["platform", "commission_pct", "extra_fees", "commission_amount", "net_received", "net_profit", "roi_pct", "heat"]
-    ].rename(
-        columns={
-            "platform": tr("col_platform"),
-            "commission_pct": tr("calc_commission"),
-            "extra_fees": tr("calc_fees"),
-            "commission_amount": tr("metric_commission"),
-            "net_received": tr("metric_net"),
-            "net_profit": tr("metric_profit"),
-            "roi_pct": tr("metric_roi"),
-            "heat": "Heat",
-        }
-    )
-    st.dataframe(show, width="stretch", hide_index=True)
+    if has_inputs:
+        compare = pd.DataFrame(compare_platforms(cost, sell))
+        show = compare[
+            ["platform", "commission_pct", "extra_fees", "commission_amount", "net_received", "net_profit", "roi_pct", "heat"]
+        ].rename(
+            columns={
+                "platform": tr("col_platform"),
+                "commission_pct": tr("calc_commission"),
+                "extra_fees": tr("calc_fees"),
+                "commission_amount": tr("metric_commission"),
+                "net_received": tr("metric_net"),
+                "net_profit": tr("metric_profit"),
+                "roi_pct": tr("metric_roi"),
+                "heat": "Heat",
+            }
+        )
+        st.dataframe(show, width="stretch", hide_index=True)
+    else:
+        st.caption(tr("calc_awaiting_input"))
 
 
 def tab_sales() -> None:
