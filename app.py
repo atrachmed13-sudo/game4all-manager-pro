@@ -798,6 +798,111 @@ def sync_inventory_state() -> pd.DataFrame:
     return frame
 
 
+# ---------------------------------------------------------------------------
+# Global active-account context — one record, read by every section (Inventory,
+# Parser, Pricing, Sales, Customer Delivery, Listing Generator) so picking an account
+# anywhere in the app instantly pre-fills the rest with zero manual typing.
+# ---------------------------------------------------------------------------
+
+
+def get_active_account_id() -> int:
+    return int(st.session_state.get("selected_active_account_id") or 0)
+
+
+def get_active_account() -> dict[str, Any] | None:
+    return st.session_state.get("selected_active_account")
+
+
+def set_active_account(row: dict[str, Any] | None) -> None:
+    """The single place that ever assigns the app-wide active account context."""
+    if row:
+        st.session_state.selected_active_account = dict(row)
+        st.session_state.selected_active_account_id = int(row.get("id") or 0)
+    else:
+        st.session_state.selected_active_account = None
+        st.session_state.selected_active_account_id = 0
+
+
+def set_active_account_by_id(item_id: int) -> None:
+    item_id = int(item_id or 0)
+    if not item_id:
+        set_active_account(None)
+        return
+    df_inventory = st.session_state.get("df_inventory")
+    row: dict[str, Any] | None = None
+    if df_inventory is not None and not df_inventory.empty and "id" in df_inventory.columns:
+        matches = df_inventory[df_inventory["id"] == item_id]
+        if not matches.empty:
+            row = matches.iloc[0].to_dict()
+    if row is None:
+        row = db.get_item(item_id)
+    set_active_account(row)
+
+
+def sync_local_account_picker(widget_key: str, valid_ids: set[int] | list[int]) -> None:
+    """Keep a per-tab account picker following the global active account.
+
+    Call this immediately *before* instantiating that picker's widget. Whenever the
+    seller changes the master account context — from the sidebar, or from a *different*
+    tab's own picker — this forces the widget's stored value to match on its next render,
+    so every section always opens already pointed at the same account instead of silently
+    disagreeing with the rest of the app. If the active account isn't a valid option for
+    this particular picker (e.g. it's already Sold and this list only offers Available
+    items), the picker is left untouched.
+    """
+    active_id = get_active_account_id()
+    seen_key = f"_active_seen_{widget_key}"
+    if active_id != st.session_state.get(seen_key) and active_id in valid_ids:
+        st.session_state[widget_key] = active_id
+    st.session_state[seen_key] = active_id
+
+
+def promote_local_pick(widget_key: str, chosen_id: int | None, *, rerun: bool = True) -> None:
+    """If the seller picked a different account directly inside a tab, promote that pick
+    to the app-wide active account too, so every other section instantly follows without
+    needing to touch the master dropdown separately."""
+    chosen_id = int(chosen_id or 0)
+    if chosen_id != get_active_account_id():
+        set_active_account_by_id(chosen_id)
+        st.session_state[f"_active_seen_{widget_key}"] = chosen_id
+        if rerun:
+            st.rerun()
+
+
+def render_active_account_selector() -> None:
+    """Master account-context selector pinned to the sidebar — reachable from every tab.
+
+    Picking an account here (or inside any tab's own picker, they all stay in sync)
+    instantly pre-fills Parser, Pricing, Sales, Listing Generator, and Customer Delivery
+    with that account's real data.
+    """
+    st.sidebar.markdown(f"**{tr('active_account_label')}**")
+    df_inventory = st.session_state.get("df_inventory", pd.DataFrame())
+    if df_inventory is None or df_inventory.empty or "id" not in df_inventory.columns:
+        st.sidebar.caption(tr("active_account_empty"))
+        set_active_account(None)
+        return
+
+    options = [0] + [int(v) for v in df_inventory["id"].tolist()]
+    labels = {0: tr("active_account_none")}
+    for _, row in df_inventory.iterrows():
+        item_id = int(row["id"])
+        email = str(row.get("login_email") or "").strip() or "—"
+        title = str(row.get("title") or row.get("game") or "Account").strip()
+        labels[item_id] = f"#{item_id} · {row.get('game') or '—'} · {title} · {email}"
+
+    sync_local_account_picker("global_account_select", set(options))
+    picked_id = st.sidebar.selectbox(
+        tr("active_account_label"),
+        options=options,
+        format_func=lambda v: labels.get(int(v), str(v)),
+        key="global_account_select",
+        label_visibility="collapsed",
+    )
+    st.sidebar.caption(tr("active_account_help"))
+    promote_local_pick("global_account_select", picked_id)
+
+
 def is_authenticated() -> bool:
     return bool(st.session_state.get("authenticated", False))
 
@@ -1092,6 +1197,7 @@ def init_crm_state() -> None:
 def bind_crm_delivery_account() -> None:
     """Fill delivery Email/Password (and product name) from the inventory row just selected."""
     picked = int(st.session_state.get("crm_delivery_account") or 0)
+    promote_local_pick("crm_delivery_account", picked, rerun=False)
     if picked <= 0:
         st.session_state.crm_bound_account = 0
         return
@@ -1204,6 +1310,9 @@ def review_message_templates(ctx: dict[str, str], lang: str = "en") -> dict[str,
 
 def sidebar() -> None:
     sidebar_chrome()
+    st.sidebar.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
+    render_active_account_selector()
+    st.sidebar.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
     init_crm_state()
     notify = st.sidebar.toggle(tr("notify_on_sale"), value=db.get_setting("notify_on_sale", "1") == "1")
     db.set_setting("notify_on_sale", "1" if notify else "0")
@@ -1295,6 +1404,7 @@ def tab_customers_delivery() -> None:
         labels[int(row["id"])] = (
             f"#{row['id']} · {row.get('status') or '—'} · {row.get('title') or row.get('game') or 'Account'} · {email}"
         )
+    sync_local_account_picker("crm_delivery_account", set(account_ids))
     picked_id = st.selectbox(
         tr("crm_delivery_account_label"),
         options=account_ids,
@@ -1302,6 +1412,10 @@ def tab_customers_delivery() -> None:
         key="crm_delivery_account",
         on_change=bind_crm_delivery_account,
     )
+    if int(st.session_state.get("crm_bound_account") or -1) != int(picked_id or 0):
+        # Covers the case where the picker's value was just force-synced from the global
+        # active account (no on_change fires for a programmatic session_state change).
+        bind_crm_delivery_account()
     chosen = next((row for row in accounts if int(row["id"]) == int(picked_id)), None)
     if st.button(tr("crm_fill_button"), type="primary", width="stretch", key="crm_insert_login"):
         if not chosen:
@@ -1512,6 +1626,7 @@ def tab_listing_generator() -> None:
             title_bit = str(row.get("title") or row.get("game") or "Account").strip()
             account_labels[item_id] = f"#{item_id} · {row.get('game') or '—'} · {title_bit}"
 
+    sync_local_account_picker("listing_source_account", set(account_ids))
     picked_id = st.selectbox(
         tr("listing_source_label"),
         options=account_ids,
@@ -1519,6 +1634,7 @@ def tab_listing_generator() -> None:
         key="listing_source_account",
     )
     st.caption(tr("listing_source_help"))
+    promote_local_pick("listing_source_account", picked_id)
 
     picked_row: dict[str, Any] | None = None
     if picked_id and df_inventory is not None and not df_inventory.empty:
@@ -1673,12 +1789,14 @@ def render_security_action() -> None:
 
     sel_col, btn_col = st.columns([2, 1])
     with sel_col:
+        sync_local_account_picker("security_target_id", set(options))
         chosen_id = st.selectbox(
             tr("security_action_select"),
             options=options,
             format_func=lambda v: labels.get(v, str(v)),
             key="security_target_id",
         )
+        promote_local_pick("security_target_id", chosen_id)
     with btn_col:
         st.markdown("<div style='height:1.7rem'></div>", unsafe_allow_html=True)
         if st.button(
@@ -1979,7 +2097,14 @@ def tab_parser() -> None:
             labels[item_id] = f"#{item_id} · {row['game']} · {row['title']}"
 
     with st.container(border=True):
-        pick = st.selectbox(tr("parser_pick"), options, format_func=lambda item_id: labels[item_id])
+        sync_local_account_picker("parser_pick_account", set(options))
+        pick = st.selectbox(
+            tr("parser_pick"),
+            options,
+            format_func=lambda item_id: labels[item_id],
+            key="parser_pick_account",
+        )
+        promote_local_pick("parser_pick_account", pick)
         seed = db.get_item(pick) if pick else None
         default_text = ""
         if seed:
@@ -2060,12 +2185,14 @@ def tab_pricing() -> None:
         pick_labels = {0: tr("parser_none")}
         for _, row in stock.iterrows():
             pick_labels[int(row["id"])] = f"#{int(row['id'])} · {row['game']} · {row['title']}"
+        sync_local_account_picker("price_item_pick", set(pick_ids))
         chosen = st.selectbox(
             tr("price_pick"),
             pick_ids,
             format_func=lambda item_id: pick_labels.get(item_id, str(item_id)),
             key="price_item_pick",
         )
+        promote_local_pick("price_item_pick", chosen)
         if chosen:
             picked = db.get_item(int(chosen))
 
@@ -2222,7 +2349,14 @@ def tab_sales() -> None:
                 int(row["id"]): f"#{int(row['id'])} · {row['game']} · {row['title']} · {money(row['list_price'])}"
                 for _, row in sellable.iterrows()
             }
-            inventory_id = st.selectbox("SKU", list(labels), format_func=lambda item_id: labels[item_id])
+            sync_local_account_picker("sale_source_account", set(labels))
+            inventory_id = st.selectbox(
+                "SKU",
+                list(labels),
+                format_func=lambda item_id: labels[item_id],
+                key="sale_source_account",
+            )
+            promote_local_pick("sale_source_account", inventory_id)
             item = db.get_item(int(inventory_id)) or {}
             title = str(item.get("title") or "")
             game = str(item.get("game") or "")
