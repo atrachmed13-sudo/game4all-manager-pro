@@ -1481,24 +1481,91 @@ def tab_license_desk() -> None:
     render_license_admin(expanded=admin_query_open())
 
 
+def _listing_rank_default(row: dict[str, Any]) -> str:
+    rank = str(row.get("rank") or "").strip()
+    level = str(row.get("level") or "").strip()
+    if rank and level:
+        return f"{rank} {level}"
+    return rank or level
+
+
+def _listing_features_default(row: dict[str, Any]) -> str:
+    bits = [str(row.get(key) or "").strip() for key in ("skins", "emotes", "extras", "server", "notes")]
+    return ", ".join(bit for bit in bits if bit)
+
+
 def tab_listing_generator() -> None:
     st.subheader(tr("listing_title"))
     st.caption(tr("listing_help"))
     delivery_keys = list(DELIVERY_KEYS)
-    with st.form("listing_generator_form"):
-        game = st.text_input(tr("listing_game"), placeholder="Valorant / Fortnite / League of Legends")
-        rank = st.text_input(tr("listing_rank"), placeholder="Immortal 3 / Champion / Level 200")
+
+    df_inventory = st.session_state.get("df_inventory", pd.DataFrame())
+    account_ids: list[int] = [0]
+    account_labels: dict[int, str] = {0: tr("listing_manual_entry")}
+    if df_inventory is not None and not df_inventory.empty and "id" in df_inventory.columns:
+        for _, row in df_inventory.iterrows():
+            item_id = int(row["id"])
+            account_ids.append(item_id)
+            title_bit = str(row.get("title") or row.get("game") or "Account").strip()
+            account_labels[item_id] = f"#{item_id} · {row.get('game') or '—'} · {title_bit}"
+
+    picked_id = st.selectbox(
+        tr("listing_source_label"),
+        options=account_ids,
+        format_func=lambda item_id: account_labels.get(int(item_id), str(item_id)),
+        key="listing_source_account",
+    )
+    st.caption(tr("listing_source_help"))
+
+    picked_row: dict[str, Any] | None = None
+    if picked_id and df_inventory is not None and not df_inventory.empty:
+        matches = df_inventory[df_inventory["id"] == picked_id]
+        if not matches.empty:
+            picked_row = matches.iloc[0].to_dict()
+
+    default_game = str(picked_row.get("game") or "") if picked_row else ""
+    default_rank = _listing_rank_default(picked_row) if picked_row else ""
+    default_extras = _listing_features_default(picked_row) if picked_row else ""
+    default_platform = str((picked_row or {}).get("platform") or "")
+    platform_options = list(LISTING_PLATFORMS)
+    platform_index = platform_options.index(default_platform) if default_platform in platform_options else 0
+
+    # Keying every field on the picked account id forces Streamlit to treat them as brand
+    # new widgets whenever the selection changes, so the auto-filled values above actually
+    # take effect instead of being shadowed by whatever was previously typed.
+    field_key = int(picked_id or 0)
+    with st.form(f"listing_generator_form_{field_key}"):
+        game = st.text_input(
+            tr("listing_game"),
+            value=default_game,
+            placeholder="Valorant / Fortnite / League of Legends",
+            key=f"listing_game_{field_key}",
+        )
+        rank = st.text_input(
+            tr("listing_rank"),
+            value=default_rank,
+            placeholder="Immortal 3 / Champion / Level 200",
+            key=f"listing_rank_{field_key}",
+        )
         delivery_key = st.selectbox(
             tr("listing_delivery"),
             options=delivery_keys,
             format_func=lambda key: tr(DELIVERY_I18N.get(key, key)),
+            key=f"listing_delivery_{field_key}",
         )
         extras = st.text_area(
             tr("listing_features"),
+            value=default_extras,
             placeholder="Full Access, rare skins, original email, ranked ready…",
             height=110,
+            key=f"listing_extras_{field_key}",
         )
-        platform = st.selectbox(tr("listing_platform"), options=list(LISTING_PLATFORMS))
+        platform = st.selectbox(
+            tr("listing_platform"),
+            options=platform_options,
+            index=platform_index,
+            key=f"listing_platform_{field_key}",
+        )
         generated = st.form_submit_button(tr("listing_generate"), type="primary", width="stretch")
 
     if generated:
