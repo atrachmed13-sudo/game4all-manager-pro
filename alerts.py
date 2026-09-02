@@ -16,6 +16,7 @@ placeholder instead of failing the sale save.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -27,6 +28,22 @@ DISCORD_PREFIXES = (
     "https://discord.com/api/webhooks/",
     "https://discordapp.com/api/webhooks/",
 )
+# A real Discord webhook is https://discord(app).com/api/webhooks/<numeric id>/<token>. Any
+# URL that doesn't match this shape (missing id/token, typo'd host, copy-pasted channel link,
+# etc.) will always 404/400 at Discord, so it's rejected locally with a clear reason instead.
+DISCORD_WEBHOOK_RE = re.compile(r"^https://(?:discord|discordapp)\.com/api/webhooks/\d+/[\w-]+/?$")
+# Telegram chat_id is either a plain/negative integer (users, groups, supergroups start with
+# -100…) or an "@channelusername". Anything else is guaranteed to come back as HTTP 400.
+TELEGRAM_CHAT_ID_RE = re.compile(r"^-?\d+$|^@[A-Za-z0-9_]{5,32}$")
+DISCORD_MAX_MESSAGE_LEN = 2000
+TELEGRAM_MAX_MESSAGE_LEN = 4096
+
+
+def _strip_wrapping_quotes(value: str) -> str:
+    """Undo the common copy/paste mistake of keeping the quotes around a .env value."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1].strip()
+    return value
 
 
 def _read_secret(name: str) -> str:
@@ -37,14 +54,14 @@ def _read_secret(name: str) -> str:
     without changing any call site.
     """
     value = (os.getenv(name) or "").strip()
-    if value:
-        return value
-    try:
-        import streamlit as st  # local import: keep this module usable without a live Streamlit runtime
+    if not value:
+        try:
+            import streamlit as st  # local import: keep this module usable without a live Streamlit runtime
 
-        return str(st.secrets.get(name, "") or "").strip()
-    except Exception:
-        return ""
+            value = str(st.secrets.get(name, "") or "").strip()
+        except Exception:
+            value = ""
+    return _strip_wrapping_quotes(value)
 
 
 @dataclass
@@ -88,61 +105,139 @@ class AlertSummary:
 
 def webhook_status() -> dict[str, bool]:
     discord = _read_secret("DISCORD_WEBHOOK_URL")
-    telegram = _read_secret("TELEGRAM_BOT_TOKEN") and _read_secret("TELEGRAM_CHAT_ID")
+    telegram_chat = _read_secret("TELEGRAM_CHAT_ID")
+    telegram = bool(_read_secret("TELEGRAM_BOT_TOKEN") and _telegram_chat_id_ok(telegram_chat))
+    discord_ok = _discord_ok(discord)
     return {
-        "discord": discord.startswith(DISCORD_PREFIXES),
-        "telegram": bool(telegram),
-        "any": bool(discord.startswith(DISCORD_PREFIXES) or telegram),
+        "discord": discord_ok,
+        "telegram": telegram,
+        "any": bool(discord_ok or telegram),
     }
 
 
 def _discord_ok(url: str) -> bool:
+    """Loose prefix check (any Discord host) used for quick UI status, not for sending."""
     return url.startswith(DISCORD_PREFIXES)
+
+
+def _discord_webhook_valid(url: str) -> bool:
+    """Strict shape check — catches truncated/garbled URLs before Discord ever sees them."""
+    return bool(DISCORD_WEBHOOK_RE.match(url))
+
+
+def _telegram_chat_id_ok(chat_id: str) -> bool:
+    return bool(TELEGRAM_CHAT_ID_RE.match(chat_id))
+
+
+def _extract_json_message(response: requests.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    return str(body.get("message") or "") if isinstance(body, dict) else ""
 
 
 def _post_discord(message: str, embed: dict[str, Any] | None = None) -> AlertResult:
     url = _read_secret("DISCORD_WEBHOOK_URL")
     if not url:
         return AlertResult(ok=False, channel="discord", skipped=True, error="DISCORD_WEBHOOK_URL is empty")
-    if not _discord_ok(url):
-        return AlertResult(ok=False, channel="discord", skipped=True, error="Discord URL placeholder is invalid")
-    payload: dict[str, Any] = {"content": message, "username": "GAME4ALL Manager Pro"}
+    if not _discord_webhook_valid(url):
+        return AlertResult(
+            ok=False,
+            channel="discord",
+            skipped=True,
+            error=(
+                "DISCORD_WEBHOOK_URL doesn't look like a real Discord webhook link "
+                "(expected https://discord.com/api/webhooks/<id>/<token>)."
+            ),
+        )
+    payload: dict[str, Any] = {
+        "content": (message or "")[:DISCORD_MAX_MESSAGE_LEN],
+        "username": "GAME4ALL Manager Pro",
+    }
     if embed:
         payload["embeds"] = [embed]
     try:
         response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
-        if 200 <= response.status_code < 300:
-            return AlertResult(ok=True, channel="discord", status_code=response.status_code)
+    except requests.RequestException as exc:
+        return AlertResult(ok=False, channel="discord", error=f"Network error: {exc}")
+
+    if 200 <= response.status_code < 300:
+        return AlertResult(ok=True, channel="discord", status_code=response.status_code)
+    if response.status_code == 404:
         return AlertResult(
             ok=False,
             channel="discord",
-            status_code=response.status_code,
-            error=f"HTTP {response.status_code}",
+            status_code=404,
+            error=(
+                "Discord webhook returned 404 Not Found — it was likely deleted or "
+                "regenerated. Open the channel's Integrations settings in Discord, create a "
+                "new webhook, and update DISCORD_WEBHOOK_URL."
+            ),
         )
-    except requests.RequestException as exc:
-        return AlertResult(ok=False, channel="discord", error=str(exc))
+    detail = _extract_json_message(response)
+    error = f"HTTP {response.status_code}" + (f" — {detail}" if detail else "")
+    return AlertResult(ok=False, channel="discord", status_code=response.status_code, error=error)
 
 
-def _post_telegram(message: str) -> AlertResult:
+def _send_telegram(message: str, *, parse_mode: str | None = None) -> AlertResult:
+    """Shared sendMessage call for both the plain sale alert and the rich Hyper-Listing push.
+
+    Validates chat_id and text locally first (the two most common causes of Telegram's
+    HTTP 400 "Bad Request") and always sends a well-formed JSON body — chat_id and text are
+    required fields per the Bot API, and parse_mode is only included when actually needed so
+    plain-text alerts can never fail on unescaped HTML/Markdown entities.
+    """
     token = _read_secret("TELEGRAM_BOT_TOKEN")
     chat_id = _read_secret("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         return AlertResult(ok=False, channel="telegram", skipped=True, error="Telegram token/chat placeholder is empty")
+    if not _telegram_chat_id_ok(chat_id):
+        return AlertResult(
+            ok=False,
+            channel="telegram",
+            skipped=True,
+            error=(
+                "TELEGRAM_CHAT_ID is not a valid chat id (expected a numeric id such as "
+                "123456789 / -1001234567890, or an @channelusername)."
+            ),
+        )
+    text = (message or "").strip()
+    if not text:
+        return AlertResult(ok=False, channel="telegram", skipped=True, error="Telegram message text is empty")
+    if len(text) > TELEGRAM_MAX_MESSAGE_LEN:
+        text = text[: TELEGRAM_MAX_MESSAGE_LEN - 1]
+
+    payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+
     url = TELEGRAM_API.format(token=token)
     try:
-        response = requests.post(
-            url,
-            json={"chat_id": chat_id, "text": message, "disable_web_page_preview": True},
-            timeout=REQUEST_TIMEOUT,
-        )
-        if 200 <= response.status_code < 300:
-            body = response.json() if "application/json" in (response.headers.get("content-type") or "") else {}
-            if isinstance(body, dict) and body.get("ok") is False:
-                return AlertResult(ok=False, channel="telegram", status_code=response.status_code, error=str(body.get("description") or "Telegram rejected the message"))
-            return AlertResult(ok=True, channel="telegram", status_code=response.status_code)
-        return AlertResult(ok=False, channel="telegram", status_code=response.status_code, error=f"HTTP {response.status_code}")
+        response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
     except requests.RequestException as exc:
-        return AlertResult(ok=False, channel="telegram", error=str(exc))
+        return AlertResult(ok=False, channel="telegram", error=f"Network error: {exc}")
+
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    description = str(body.get("description") or "") if isinstance(body, dict) else ""
+
+    if 200 <= response.status_code < 300 and not (isinstance(body, dict) and body.get("ok") is False):
+        return AlertResult(ok=True, channel="telegram", status_code=response.status_code)
+    if response.status_code == 400:
+        hint = description or (
+            "Bad Request — check that TELEGRAM_CHAT_ID is correct and that the bot has "
+            "actually been started/added to that chat."
+        )
+        return AlertResult(ok=False, channel="telegram", status_code=400, error=f"HTTP 400 — {hint}")
+    error = f"HTTP {response.status_code}" + (f" — {description}" if description else "")
+    return AlertResult(ok=False, channel="telegram", status_code=response.status_code, error=error)
+
+
+def _post_telegram(message: str) -> AlertResult:
+    return _send_telegram(message)
 
 
 def push_telegram_message(message: str, *, parse_mode: str = "HTML") -> AlertResult:
@@ -150,31 +245,13 @@ def push_telegram_message(message: str, *, parse_mode: str = "HTML") -> AlertRes
 
     Used by the Hyper-Listing & Secure Telegram Dispatcher to push a listing card
     bundled with fresh delivery credentials and a session-revocation confirmation stamp.
+    Wrapped in the same unexpected-error guard as ``notify_sale`` so a bad push can never
+    crash the security/dispatch flow in the UI.
     """
-    token = _read_secret("TELEGRAM_BOT_TOKEN")
-    chat_id = _read_secret("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        return AlertResult(ok=False, channel="telegram", skipped=True, error="Telegram token/chat placeholder is empty")
-    url = TELEGRAM_API.format(token=token)
     try:
-        response = requests.post(
-            url,
-            json={
-                "chat_id": chat_id,
-                "text": message,
-                "parse_mode": parse_mode,
-                "disable_web_page_preview": True,
-            },
-            timeout=REQUEST_TIMEOUT,
-        )
-        if 200 <= response.status_code < 300:
-            body = response.json() if "application/json" in (response.headers.get("content-type") or "") else {}
-            if isinstance(body, dict) and body.get("ok") is False:
-                return AlertResult(ok=False, channel="telegram", status_code=response.status_code, error=str(body.get("description") or "Telegram rejected the message"))
-            return AlertResult(ok=True, channel="telegram", status_code=response.status_code)
-        return AlertResult(ok=False, channel="telegram", status_code=response.status_code, error=f"HTTP {response.status_code}")
-    except requests.RequestException as exc:
-        return AlertResult(ok=False, channel="telegram", error=str(exc))
+        return _send_telegram(message, parse_mode=parse_mode)
+    except Exception as exc:  # pragma: no cover - defensive
+        return AlertResult(ok=False, channel="telegram", error=f"Unexpected error: {exc}")
 
 
 def format_sale_message(
@@ -210,6 +287,21 @@ def format_sale_message(
     return text, embed
 
 
+def _safe_send(channel: str, sender: Any, *args: Any) -> AlertResult:
+    """Run a channel sender and guarantee an AlertResult comes back no matter what.
+
+    ``_post_discord``/``_post_telegram`` already turn network/HTTP failures into a result
+    object, but this outer guard means a truly unexpected bug (bad credentials shape, a
+    library raising something other than ``requests.RequestException``, etc.) still can't
+    bubble up and crash the sale-recording flow in the UI — it just shows up as one more
+    failed channel with a readable message.
+    """
+    try:
+        return sender(*args)
+    except Exception as exc:  # pragma: no cover - defensive: sender() already catches requests errors
+        return AlertResult(ok=False, channel=channel, error=f"Unexpected error: {exc}")
+
+
 def notify_sale(
     *,
     title: str,
@@ -232,7 +324,7 @@ def notify_sale(
         roi_pct=roi_pct,
         currency=currency,
     )
-    results = [_post_discord(text, embed), _post_telegram(text)]
+    results = [_safe_send("discord", _post_discord, text, embed), _safe_send("telegram", _post_telegram, text)]
     if all(r.skipped for r in results):
         results.append(AlertResult(ok=False, channel="none", skipped=True, error="No webhook configured"))
     return AlertSummary(results=results)
