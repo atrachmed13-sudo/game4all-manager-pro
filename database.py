@@ -428,6 +428,23 @@ def bulk_set_status(item_ids: list[int], status: str) -> int:
     return len(item_ids)
 
 
+def clear_inventory() -> int:
+    """Wipe every inventory row so the seller can start a batch pack import from zero.
+
+    Powers the "🔄 Reset / Clear All" button in the Upload section. Any ``sales`` record
+    referencing a row being deleted is first unlinked (``inventory_id`` set to NULL,
+    mirroring ``_purge_legacy_sample_inventory``) instead of blocked by the foreign key —
+    the sale history itself is intentionally kept; only the *inventory* table is reset.
+    """
+    with get_connection() as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if "sales" in tables:
+            conn.execute("UPDATE sales SET inventory_id = NULL WHERE inventory_id IS NOT NULL")
+        cursor = conn.execute("DELETE FROM inventory")
+        conn.commit()
+        return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+
+
 def secure_and_revoke_sessions(item_ids: list[int]) -> int:
     """Lock the security flag and stamp a session-revocation timestamp for the given accounts.
 

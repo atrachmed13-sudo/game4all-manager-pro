@@ -18,9 +18,12 @@ from pricing import PLATFORMS, get_platform_profile
 # The local part (before @) also stops at | ; , so a compact pipe/semicolon-delimited line
 # like "League of Legends|EUW|Smurf|Full Access|buyer@mail.com:pass" never bleeds the
 # previous field ("...Access") into the email, corrupting game/rank/extras downstream.
-# Password stops at whitespace / | / ; / / so listing fields after a combo stay separate.
+# Password stops at whitespace / | / ; / , / so listing fields after a combo stay separate.
+# Separator itself accepts : | ; / or , — covers "email:pass", "email;pass", "email,pass"
+# and spaced variants like "email | pass" alike (the loose fallback in split_login_combo()
+# below also catches spaced separators the strict regex here doesn't sit right next to).
 COMBO_IN_TEXT = re.compile(
-    r"([^\s@|;,]+@[^\s@]+\.[A-Za-z0-9.-]+)[:|;/\t]([^\s|;/]+)",
+    r"([^\s@|;,]+@[^\s@]+\.[A-Za-z0-9.-]+)[:|;/,\t]([^\s|;/,]+)",
     re.IGNORECASE,
 )
 CREDENTIAL_LINE = re.compile(
@@ -224,6 +227,33 @@ def _norm(value: Any) -> str:
     return str(value or "").strip()
 
 
+# Encodings to try, in order, before ever falling back to lossy replacement. Files
+# exported from Notepad/Excel on a non-English Windows locale ("ANSI") are very often
+# cp1256 (Arabic) or cp1252 (Western Europe) — decoding those as strict UTF-8 doesn't
+# raise an error for every byte, but scrambles accented/Arabic bytes into "�"/"?" noise
+# that then throws off every downstream column, which is exactly the garbled-table symptom.
+_TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "cp1256", "cp1252", "utf-16", "latin-1")
+
+
+def decode_upload_bytes(raw: bytes) -> str:
+    """Decode an uploaded TXT/CSV/combo file into text, auto-detecting its encoding.
+
+    Tries UTF-8 (with/without BOM) first, then the Windows "ANSI" code pages a
+    Notepad/Excel export on an Arabic or Western European locale is most likely to use,
+    before finally falling back to Latin-1 (which never raises, since it's a straight
+    byte-to-codepoint mapping) so upload never crashes outright — but by that point the
+    earlier candidates almost always already matched cleanly.
+    """
+    if not raw:
+        return ""
+    for encoding in _TEXT_ENCODINGS:
+        try:
+            return raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def is_credential_line(text: str) -> bool:
     """True when a line looks like an email:password combo."""
     return bool(split_login_combo(text or "")[0])
@@ -237,7 +267,9 @@ def split_login_combo(text: str) -> tuple[str, str]:
     raw = _norm(text)
     if not raw:
         return "", ""
-    parts = re.split(r"[:|;/\t]", raw, maxsplit=1)
+    # Loose fallback for separators the strict regex above doesn't sit right next to —
+    # e.g. "email@x.com | pass123" (spaces around the pipe) or a trailing/odd separator.
+    parts = re.split(r"[:|;/,\t]", raw, maxsplit=1)
     if len(parts) == 2 and "@" in parts[0]:
         return parts[0].strip(), parts[1].strip()
     return "", ""
@@ -377,7 +409,18 @@ def extract_features(text: str, seed: dict[str, Any] | None = None) -> dict[str,
     title = _norm((seed or {}).get("title"))
     if not title:
         bits = [part for part in (game, rank, skins and "loaded") if part]
-        title = " ".join(bits) if bits else source[:80].strip()
+        if bits:
+            title = " ".join(bits)
+        else:
+            # A line with nothing else to go on but a bare "email:password" combo should
+            # never surface the raw combo (password included) as the visible title — fall
+            # back to just the email instead of leaking the credential into the UI.
+            combo_email, combo_password = split_login_combo(source)
+            clean_source = source
+            if combo_email and combo_password:
+                combo_needle = re.compile(re.escape(combo_email) + r"\s*[:|;/,\t]?\s*" + re.escape(combo_password))
+                clean_source = combo_needle.sub(" ", source, count=1).strip(" |;,:\t")
+            title = clean_source[:80].strip() or combo_email
 
     return {
         "title": title,
@@ -475,14 +518,48 @@ def _parse_pipe_line(line: str) -> dict[str, Any]:
     if email and password:
         mapped["login_email"] = email
         mapped["login_password"] = password
-        line_for_parts = COMBO_IN_TEXT.sub(" ", line, count=1)
-    parts = [part.strip() for part in re.split(r"[|/;]+", line_for_parts) if part.strip()]
+        # Strip out the matched "email <sep> password" chunk as one unit so neither the
+        # credentials nor a stray leftover separator (":" / "|" ...) pollute the
+        # "notes"/"title" leftover text below. Matching literal values (not just the
+        # strict-regex .sub()) also covers combos only found via split_login_combo()'s
+        # looser fallback — e.g. "email@x.com | pass123" with spaces around the separator,
+        # which the strict COMBO_IN_TEXT regex doesn't match but the fallback does.
+        combo_needle = re.compile(re.escape(email) + r"\s*[:|;/,\t]?\s*" + re.escape(password))
+        line_for_parts, count = combo_needle.subn(" ", line, count=1)
+        if not count:
+            line_for_parts = line.replace(email, " ", 1).replace(password, " ", 1)
+    parts = [part.strip() for part in re.split(r"[|/;,]+", line_for_parts) if part.strip()]
     leftover = []
-    for part in parts:
+    kv_prefix_re = re.compile(
+        r"^(cost|buy|sell|price|lvl|level|rank|game|server|skins|emotes|platform|email|password|combo)\s*[=:]",
+        re.IGNORECASE,
+    )
+    bare_email_re = re.compile(r"^[^\s@]+@[^\s@]+\.[A-Za-z0-9.-]+$")
+    idx = 0
+    while idx < len(parts):
+        part = parts[idx]
         email, password = split_login_combo(part)
         if email and password:
             mapped["login_email"] = mapped["login_email"] or email
             mapped["login_password"] = mapped["login_password"] or password
+            idx += 1
+            continue
+        # A fully pipe/comma-delimited row where every column — including the login —
+        # shares the same delimiter (e.g. "Fortnite | EU | buyer@mail.com | Pass123!") has
+        # no distinct separator tying email to password, so split_login_combo() alone can't
+        # see it: the email and password simply land as two consecutive plain fields. Pair
+        # a bare email field with whatever immediately follows it, unless that next field is
+        # clearly a labeled key=value pair for something else.
+        if (
+            not mapped["login_password"]
+            and bare_email_re.match(part)
+            and idx + 1 < len(parts)
+            and " " not in parts[idx + 1]
+            and not kv_prefix_re.match(parts[idx + 1])
+        ):
+            mapped["login_email"] = mapped["login_email"] or part
+            mapped["login_password"] = parts[idx + 1]
+            idx += 2
             continue
         kv = re.match(r"^(cost|buy|sell|price|lvl|level|rank|game|server|skins|emotes|platform|email|password|combo)\s*[=:]\s*(.+)$", part, re.IGNORECASE)
         if not kv:
@@ -515,8 +592,10 @@ def _parse_pipe_line(line: str) -> dict[str, Any]:
                 mapped["login_password"] = val
             elif key == "combo":
                 mapped["combo"] = val
+            idx += 1
             continue
         leftover.append(part)
+        idx += 1
     if leftover:
         mapped["title"] = leftover[0]
         mapped["notes"] = " | ".join(leftover)

@@ -47,6 +47,7 @@ generate_marketplace_listing = parser_mod.generate_marketplace_listing
 generate_hyper_listing = parser_mod.generate_hyper_listing
 generate_sales_copy = parser_mod.generate_sales_copy
 parse_batch_text = parser_mod.parse_batch_text
+decode_upload_bytes = parser_mod.decode_upload_bytes
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -796,6 +797,57 @@ def sync_inventory_state() -> pd.DataFrame:
     if not frame.empty:
         st.session_state.pack_uploaded = True
     return frame
+
+
+# Every non-widget session_state key that a batch-pack upload can populate — cleared by
+# the "🔄 Reset / Clear All" button so a fresh import starts from a genuinely clean slate.
+_UPLOAD_RELATED_STATE_KEYS = (
+    "preview_rows",
+    "preview_imported",
+    "pack_name",
+    "current_parsed_account",
+    "listing_pack",
+    "listing_pack_kind",
+    "features",
+    "generated_copy",
+    "hyper_listing_pack",
+    "selected_active_account",
+    "selected_active_account_id",
+)
+# Widget keys tied to a specific inventory row id — dropped too, so they reinitialize
+# instead of pointing at an id that no longer exists after the wipe.
+_UPLOAD_RELATED_WIDGET_KEY_PREFIXES = (
+    "parser_pick_account",
+    "parser_pasted_",
+    "listing_source_account",
+    "price_item_pick",
+    "sale_source_account",
+    "security_target_id",
+    "crm_delivery_account",
+    "global_account_select",
+    "_active_seen_",
+    "_crm_bound_seen",
+)
+
+
+def reset_inventory_state() -> None:
+    """Full "start from zero" reset for the Upload batch pack section.
+
+    Wipes the inventory table itself (not just the session mirror — otherwise the very
+    next rerun's ``sync_inventory_state()`` would immediately reload it straight back from
+    the database) plus every session_state key any upload/parse/listing flow could have
+    populated, then reruns so every tab redraws against a genuinely empty inventory.
+    """
+    db.clear_inventory()
+    st.session_state.df_inventory = pd.DataFrame()
+    st.session_state.pack_uploaded = False
+    for key in _UPLOAD_RELATED_STATE_KEYS:
+        st.session_state.pop(key, None)
+    for key in list(st.session_state.keys()):
+        if any(key == prefix or key.startswith(prefix) for prefix in _UPLOAD_RELATED_WIDGET_KEY_PREFIXES):
+            st.session_state.pop(key, None)
+    flash("success", tr("reset_all_success"))
+    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -1908,9 +1960,17 @@ def tab_inventory() -> None:
             value=st.session_state.get("pack_name") or f"PACK-{datetime.now(timezone.utc).strftime('%m%d-%H%M')}",
         )
         st.caption(tr("sample_hint"))
+        if st.button(tr("reset_all_button"), key="reset_all_button", type="secondary", use_container_width=True):
+            reset_inventory_state()
+        st.caption(tr("reset_all_help"))
 
     if uploaded is not None:
-        raw = uploaded.getvalue().decode("utf-8", errors="replace")
+        # Auto-detect encoding instead of assuming UTF-8 — a TXT/combo pack exported from
+        # Notepad/Excel on a non-English Windows locale is very often "ANSI" (cp1256 for
+        # Arabic, cp1252 for Western Europe), and forcing strict UTF-8 on that scrambles
+        # every non-ASCII byte into "�"/"?" noise, which is exactly what throws off column
+        # alignment in the preview table.
+        raw = decode_upload_bytes(uploaded.getvalue())
         parsed = parse_uploaded_pack(raw, uploaded.name)
         st.session_state.preview_rows = parsed["rows"]
         st.session_state.preview_imported = int(parsed.get("imported_logins") or 0)
