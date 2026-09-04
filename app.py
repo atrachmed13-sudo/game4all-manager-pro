@@ -909,7 +909,7 @@ def import_pack_to_stock(pack_id: str) -> int:
     pack_frame = db.inventory_frame(pack_id=pack_id)
     if isinstance(source_df, pd.DataFrame) and not source_df.empty:
         st.session_state.inventory = attach_db_ids(source_df, pack_frame)
-    finalize_active_account_after_import(pack_id)
+    st.session_state._pending_active_account_sync = pack_id
     return inserted
 
 
@@ -931,6 +931,7 @@ _UPLOAD_RELATED_STATE_KEYS = (
     "hyper_listing_pack",
     "selected_active_account",
     "selected_active_account_id",
+    "_pending_active_account_sync",
 )
 # Widget keys tied to a specific inventory row id — dropped too, so they reinitialize
 # instead of pointing at an id that no longer exists after the wipe.
@@ -1068,20 +1069,46 @@ def sync_inventory_account_widgets(*, force: bool = False) -> None:
 
 
 def finalize_active_account_after_import(pack_id: str) -> None:
-    """Reset stale picker state after Import into stock and auto-select the newest row."""
+    """Reset stale picker state after Import into stock and expose every new row."""
+    live_inventory_frame()
     sync_inventory_account_widgets(force=True)
-
-    pack_frame = db.inventory_frame(pack_id=pack_id)
-    if pack_frame is None or pack_frame.empty or "id" not in pack_frame.columns:
-        widget_key = global_account_select_key()
-        st.session_state[widget_key] = 0
-        return
-
-    newest_id = int(pack_frame.sort_values("id", ascending=False).iloc[0]["id"])
-    set_active_account_by_id(newest_id)
     widget_key = global_account_select_key()
-    st.session_state[widget_key] = newest_id
-    st.session_state[f"_active_seen_{widget_key}"] = newest_id
+    set_active_account(None)
+    st.session_state[widget_key] = 0
+    st.session_state[f"_active_seen_{widget_key}"] = 0
+    st.session_state.pop("_pending_active_account_sync", None)
+
+
+def process_pending_active_account_sync() -> None:
+    """Run post-import active-account refresh on the rerun after Import into stock."""
+    pack_id = st.session_state.get("_pending_active_account_sync")
+    if not pack_id:
+        return
+    finalize_active_account_after_import(str(pack_id))
+
+
+def refresh_active_account_from_db(frame: pd.DataFrame) -> None:
+    """Keep selected_active_account bound to the latest SQLite row on every rerun."""
+    active_id = get_active_account_id()
+    if not active_id:
+        return
+    if active_id not in set(inventory_account_ids(frame)):
+        set_active_account(None)
+        return
+    row = db.get_item(active_id)
+    if row:
+        set_active_account(row)
+
+
+def bind_active_account_selectbox(widget_key: str, options: list[int]) -> None:
+    """Ensure the selectbox value always references a valid, current inventory id."""
+    valid = set(options)
+    active_id = get_active_account_id()
+    current = int(st.session_state.get(widget_key) or 0)
+    if current not in valid:
+        st.session_state[widget_key] = active_id if active_id in valid else 0
+    elif active_id in valid:
+        st.session_state[widget_key] = active_id
 
 
 def active_account_option_labels(frame: pd.DataFrame) -> tuple[list[int], dict[int, str]]:
@@ -1090,11 +1117,20 @@ def active_account_option_labels(frame: pd.DataFrame) -> tuple[list[int], dict[i
     labels: dict[int, str] = {0: tr("active_account_none")}
     if frame is None or frame.empty or "id" not in frame.columns:
         return options, labels
-    for _, row in frame.iterrows():
+    ordered = frame.sort_values("id", ascending=True) if "id" in frame.columns else frame
+    for pos, (_, row) in enumerate(ordered.iterrows(), start=1):
         item_id = int(row["id"])
         email = str(row.get("login_email") or "").strip() or "—"
-        title = str(row.get("title") or row.get("game") or "Account").strip()
-        labels[item_id] = f"#{item_id} · {row.get('game') or '—'} · {title} · {email}"
+        title = str(row.get("title") or "").strip()
+        game = str(row.get("game") or "").strip()
+        account_name = title or game or f"Account {pos}"
+        rank = str(row.get("rank") or "").strip()
+        bits = [f"#{item_id}", account_name]
+        if rank:
+            bits.append(rank)
+        if email != "—":
+            bits.append(email)
+        labels[item_id] = " · ".join(bits)
     return options, labels
 
 
@@ -1117,14 +1153,13 @@ def set_active_account_by_id(item_id: int) -> None:
     if not item_id:
         set_active_account(None)
         return
-    df_inventory = st.session_state.get("df_inventory")
-    row: dict[str, Any] | None = None
-    if df_inventory is not None and not df_inventory.empty and "id" in df_inventory.columns:
-        matches = df_inventory[df_inventory["id"] == item_id]
-        if not matches.empty:
-            row = matches.iloc[0].to_dict()
+    row = db.get_item(item_id)
     if row is None:
-        row = db.get_item(item_id)
+        df_inventory = st.session_state.get("df_inventory")
+        if df_inventory is not None and not df_inventory.empty and "id" in df_inventory.columns:
+            matches = df_inventory[df_inventory["id"] == item_id]
+            if not matches.empty:
+                row = matches.iloc[0].to_dict()
     set_active_account(row)
 
 
@@ -1170,6 +1205,7 @@ def render_active_account_selector() -> None:
     instantly pre-fills Parser, Pricing, Sales, Listing Generator, and Customer Delivery
     with that account's real data.
     """
+    process_pending_active_account_sync()
     st.sidebar.markdown(f"**{tr('active_account_label')}**")
     df_inventory = live_inventory_frame()
     sync_inventory_account_widgets()
@@ -1179,8 +1215,10 @@ def render_active_account_selector() -> None:
         set_active_account(None)
         return
 
+    refresh_active_account_from_db(df_inventory)
     options, labels = active_account_option_labels(df_inventory)
     widget_key = global_account_select_key()
+    bind_active_account_selectbox(widget_key, options)
     sync_local_account_picker(widget_key, set(options))
     picked_id = st.sidebar.selectbox(
         tr("active_account_label"),
