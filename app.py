@@ -823,6 +823,7 @@ def pull_inventory_from_db(*, preserve_preview: bool = False) -> pd.DataFrame:
     else:
         filtered = frame
     st.session_state.inventory = build_stock_display(filtered, field_labels, pack_filter)
+    sync_inventory_account_widgets()
     return frame
 
 
@@ -908,6 +909,7 @@ def import_pack_to_stock(pack_id: str) -> int:
     pack_frame = db.inventory_frame(pack_id=pack_id)
     if isinstance(source_df, pd.DataFrame) and not source_df.empty:
         st.session_state.inventory = attach_db_ids(source_df, pack_frame)
+    finalize_active_account_after_import(pack_id)
     return inserted
 
 
@@ -932,6 +934,14 @@ _UPLOAD_RELATED_STATE_KEYS = (
 )
 # Widget keys tied to a specific inventory row id — dropped too, so they reinitialize
 # instead of pointing at an id that no longer exists after the wipe.
+_ACCOUNT_PICKER_WIDGET_KEYS = (
+    "parser_pick_account",
+    "listing_source_account",
+    "price_item_pick",
+    "sale_source_account",
+    "security_target_id",
+    "crm_delivery_account",
+)
 _UPLOAD_RELATED_WIDGET_KEY_PREFIXES = (
     "parser_pick_account",
     "parser_pasted_",
@@ -943,6 +953,8 @@ _UPLOAD_RELATED_WIDGET_KEY_PREFIXES = (
     "global_account_select",
     "_active_seen_",
     "_crm_bound_seen",
+    "_inventory_accounts_fp",
+    "_account_picker_rev",
 )
 
 
@@ -959,6 +971,10 @@ def reset_inventory_state() -> None:
     st.session_state.df_inventory = pd.DataFrame()
     st.session_state.inventory = pd.DataFrame()
     st.session_state.pack_uploaded = False
+    st.session_state.pop("_inventory_accounts_fp", None)
+    st.session_state.pop("_account_picker_rev", None)
+    bump_account_picker_revision()
+    invalidate_account_picker_cache(keep_active_if_valid=False)
     for key in _UPLOAD_RELATED_STATE_KEYS:
         st.session_state.pop(key, None)
     for key in list(st.session_state.keys()):
@@ -977,6 +993,109 @@ def reset_inventory_state() -> None:
 
 def get_active_account_id() -> int:
     return int(st.session_state.get("selected_active_account_id") or 0)
+
+
+def live_inventory_frame() -> pd.DataFrame:
+    """Always read the latest stock rows from SQLite (not a stale session cache)."""
+    frame = db.inventory_frame()
+    st.session_state.df_inventory = frame
+    if frame.empty:
+        st.session_state.pack_uploaded = False
+    else:
+        st.session_state.pack_uploaded = True
+    return frame
+
+
+def global_account_select_key() -> str:
+    """Streamlit widget key rotates when inventory changes so options never stay cached."""
+    revision = int(st.session_state.get("_account_picker_rev") or 0)
+    return f"global_account_select_{revision}"
+
+
+def bump_account_picker_revision() -> int:
+    revision = int(st.session_state.get("_account_picker_rev") or 0) + 1
+    st.session_state._account_picker_rev = revision
+    return revision
+
+
+def inventory_account_ids(frame: pd.DataFrame | None = None) -> list[int]:
+    """Return inventory row ids from the live DB mirror (newest first)."""
+    df_inventory = frame if frame is not None else st.session_state.get("df_inventory", pd.DataFrame())
+    if df_inventory is None or df_inventory.empty or "id" not in df_inventory.columns:
+        return []
+    ids = [int(v) for v in df_inventory["id"].tolist()]
+    return sorted(ids, reverse=True)
+
+
+def inventory_accounts_fingerprint(frame: pd.DataFrame | None = None) -> str:
+    """Stable signature of current stock — changes whenever rows are imported or wiped."""
+    return ",".join(str(item_id) for item_id in sorted(inventory_account_ids(frame)))
+
+
+def _pop_stale_account_picker_keys() -> None:
+    for key in list(st.session_state.keys()):
+        if key.startswith("global_account_select"):
+            st.session_state.pop(key, None)
+        elif key in _ACCOUNT_PICKER_WIDGET_KEYS:
+            st.session_state.pop(key, None)
+            st.session_state.pop(f"_active_seen_{key}", None)
+        elif key.startswith("_active_seen_") or key.startswith("_crm_bound_seen"):
+            st.session_state.pop(key, None)
+
+
+def invalidate_account_picker_cache(*, keep_active_if_valid: bool = True) -> None:
+    """Clear cached Streamlit picker values so new imports show up immediately."""
+    frame = live_inventory_frame()
+    valid = set(inventory_account_ids(frame))
+    active_id = get_active_account_id()
+    _pop_stale_account_picker_keys()
+
+    if keep_active_if_valid and active_id in valid:
+        set_active_account_by_id(active_id)
+    else:
+        set_active_account(None)
+
+
+def sync_inventory_account_widgets(*, force: bool = False) -> None:
+    """Invalidate account pickers when inventory rows change (import, boot, reset)."""
+    frame = live_inventory_frame()
+    fingerprint = inventory_accounts_fingerprint(frame)
+    previous = st.session_state.get("_inventory_accounts_fp")
+    if force or fingerprint != previous:
+        bump_account_picker_revision()
+        st.session_state._inventory_accounts_fp = fingerprint
+        invalidate_account_picker_cache(keep_active_if_valid=not force)
+
+
+def finalize_active_account_after_import(pack_id: str) -> None:
+    """Reset stale picker state after Import into stock and auto-select the newest row."""
+    sync_inventory_account_widgets(force=True)
+
+    pack_frame = db.inventory_frame(pack_id=pack_id)
+    if pack_frame is None or pack_frame.empty or "id" not in pack_frame.columns:
+        widget_key = global_account_select_key()
+        st.session_state[widget_key] = 0
+        return
+
+    newest_id = int(pack_frame.sort_values("id", ascending=False).iloc[0]["id"])
+    set_active_account_by_id(newest_id)
+    widget_key = global_account_select_key()
+    st.session_state[widget_key] = newest_id
+    st.session_state[f"_active_seen_{widget_key}"] = newest_id
+
+
+def active_account_option_labels(frame: pd.DataFrame) -> tuple[list[int], dict[int, str]]:
+    """Build selectbox options + labels from the current inventory frame."""
+    options = [0] + inventory_account_ids(frame)
+    labels: dict[int, str] = {0: tr("active_account_none")}
+    if frame is None or frame.empty or "id" not in frame.columns:
+        return options, labels
+    for _, row in frame.iterrows():
+        item_id = int(row["id"])
+        email = str(row.get("login_email") or "").strip() or "—"
+        title = str(row.get("title") or row.get("game") or "Account").strip()
+        labels[item_id] = f"#{item_id} · {row.get('game') or '—'} · {title} · {email}"
+    return options, labels
 
 
 def get_active_account() -> dict[str, Any] | None:
@@ -1020,9 +1139,14 @@ def sync_local_account_picker(widget_key: str, valid_ids: set[int] | list[int]) 
     this particular picker (e.g. it's already Sold and this list only offers Available
     items), the picker is left untouched.
     """
+    valid_set = {int(v) for v in valid_ids}
     active_id = get_active_account_id()
     seen_key = f"_active_seen_{widget_key}"
-    if active_id != st.session_state.get(seen_key) and active_id in valid_ids:
+    current = int(st.session_state.get(widget_key) or 0)
+
+    if current and current not in valid_set:
+        st.session_state[widget_key] = active_id if active_id in valid_set else 0
+    elif active_id != st.session_state.get(seen_key) and active_id in valid_set:
         st.session_state[widget_key] = active_id
     st.session_state[seen_key] = active_id
 
@@ -1047,30 +1171,26 @@ def render_active_account_selector() -> None:
     with that account's real data.
     """
     st.sidebar.markdown(f"**{tr('active_account_label')}**")
-    df_inventory = st.session_state.get("df_inventory", pd.DataFrame())
-    if df_inventory is None or df_inventory.empty or "id" not in df_inventory.columns:
+    df_inventory = live_inventory_frame()
+    sync_inventory_account_widgets()
+
+    if df_inventory.empty or "id" not in df_inventory.columns:
         st.sidebar.caption(tr("active_account_empty"))
         set_active_account(None)
         return
 
-    options = [0] + [int(v) for v in df_inventory["id"].tolist()]
-    labels = {0: tr("active_account_none")}
-    for _, row in df_inventory.iterrows():
-        item_id = int(row["id"])
-        email = str(row.get("login_email") or "").strip() or "—"
-        title = str(row.get("title") or row.get("game") or "Account").strip()
-        labels[item_id] = f"#{item_id} · {row.get('game') or '—'} · {title} · {email}"
-
-    sync_local_account_picker("global_account_select", set(options))
+    options, labels = active_account_option_labels(df_inventory)
+    widget_key = global_account_select_key()
+    sync_local_account_picker(widget_key, set(options))
     picked_id = st.sidebar.selectbox(
         tr("active_account_label"),
         options=options,
         format_func=lambda v: labels.get(int(v), str(v)),
-        key="global_account_select",
+        key=widget_key,
         label_visibility="collapsed",
     )
     st.sidebar.caption(tr("active_account_help"))
-    promote_local_pick("global_account_select", picked_id)
+    promote_local_pick(widget_key, picked_id, rerun=False)
 
 
 def is_authenticated() -> bool:
@@ -3122,6 +3242,7 @@ def bootstrap_inventory_if_empty() -> int:
     if inserted > 0 or not snapshots:
         hint = source_path or db.get_setting("boot_inventory_source")
         _sync_boot_inventory_session(hint)
+        finalize_active_account_after_import(BOOT_PACK_ID)
     else:
         pull_inventory_from_db(preserve_preview=False)
 
