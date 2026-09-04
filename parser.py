@@ -32,8 +32,21 @@ CREDENTIAL_LINE = re.compile(
 )
 
 COLUMN_ALIASES = {
+    "account_no": {
+        "account_no",
+        "account_number",
+        "account_num",
+        "account",
+        "acct_no",
+        "acct",
+        "no",
+        "num",
+        "number",
+        "n",
+        "#",
+    },
     "sku": {"sku", "id", "ref", "code"},
-    "title": {"title", "name", "item", "listing", "account"},
+    "title": {"title", "name", "item", "listing"},
     "game": {"game", "jeu", "title_game"},
     "rank": {"rank", "tier", "elo", "rr"},
     "level": {"level", "lvl", "niveau"},
@@ -47,7 +60,20 @@ COLUMN_ALIASES = {
     "status": {"status", "state", "stock"},
     "notes": {"notes", "note", "desc", "description", "raw"},
     "login_email": {"email", "mail", "e_mail", "login_email", "user", "username", "login", "account_email"},
-    "login_password": {"password", "pass", "passwd", "pwd", "pass_word", "login_password", "account_password"},
+    "login_password": {
+        "password",
+        "pass",
+        "passwd",
+        "pwd",
+        "pass_word",
+        "login_password",
+        "account_password",
+        "epic_password",
+        "epic_pass",
+    },
+    "mail_password": {"mail_password", "mail_pass", "inbox_password"},
+    "old_password": {"old_password", "old_pass", "previous_password", "former_password"},
+    "secret_answer": {"secret_answer", "security_answer", "sa", "sqa", "answer"},
     "combo": {"combo", "login_combo", "ep", "userpass", "email_password"},
 }
 
@@ -227,31 +253,76 @@ def _norm(value: Any) -> str:
     return str(value or "").strip()
 
 
-# Encodings to try, in order, before ever falling back to lossy replacement. Files
-# exported from Notepad/Excel on a non-English Windows locale ("ANSI") are very often
-# cp1256 (Arabic) or cp1252 (Western Europe) — decoding those as strict UTF-8 doesn't
-# raise an error for every byte, but scrambles accented/Arabic bytes into "�"/"?" noise
-# that then throws off every downstream column, which is exactly the garbled-table symptom.
-_TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "cp1256", "cp1252", "utf-16", "latin-1")
+# Strict decode order for uploaded TXT/combo packs (Arabic Windows exports are usually cp1256).
+_DECODE_ORDER = ("utf-8-sig", "utf-8", "cp1256", "latin1")
+# Replacement chars and long "?" runs usually mean the wrong code page was picked.
+_MOJIBAKE_CHAR = "\ufffd"
+_GARBLED_RUN = re.compile(r"\?{2,}")
+_GARBLED_FIELD_PREFIX = re.compile(r"^[\?\ufffd�\s=\-*_~#|:،]+")
+_GARBLED_LINE = re.compile(r"^[\?\ufffd�\s=\-*_~#|]+$")
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _decode_quality_score(text: str) -> int:
+    """Higher is better — penalise replacement chars and long question-mark runs."""
+    if not text:
+        return 0
+    bad = text.count(_MOJIBAKE_CHAR) + text.count("�")
+    bad += sum(len(match.group(0)) for match in _GARBLED_RUN.finditer(text))
+    return len(text) - bad * 12
+
+
+def _sanitize_decoded_text(text: str) -> str:
+    """Drop lines that are pure mojibake noise; collapse blank lines."""
+    cleaned_lines: list[str] = []
+    blank_run = 0
+    for raw_line in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = _clean_display_line(raw_line)
+        if not line:
+            blank_run += 1
+            if blank_run <= 1:
+                cleaned_lines.append("")
+            continue
+        blank_run = 0
+        if _GARBLED_LINE.match(line):
+            continue
+        cleaned_lines.append(line)
+    while cleaned_lines and not cleaned_lines[-1]:
+        cleaned_lines.pop()
+    return "\n".join(cleaned_lines)
 
 
 def decode_upload_bytes(raw: bytes) -> str:
-    """Decode an uploaded TXT/CSV/combo file into text, auto-detecting its encoding.
+    """Decode an uploaded TXT/CSV/combo file using a fixed encoding order.
 
-    Tries UTF-8 (with/without BOM) first, then the Windows "ANSI" code pages a
-    Notepad/Excel export on an Arabic or Western European locale is most likely to use,
-    before finally falling back to Latin-1 (which never raises, since it's a straight
-    byte-to-codepoint mapping) so upload never crashes outright — but by that point the
-    earlier candidates almost always already matched cleanly.
+    Order: ``utf-8-sig`` → ``utf-8`` → ``cp1256`` (Arabic Windows) → ``latin1``.
+    The candidate with the fewest replacement / ``??`` artefacts wins. A final
+    ``latin1`` + ``errors='replace'`` pass strips damaged bytes instead of
+    leaving them in Titles / grid cells.
     """
     if not raw:
         return ""
-    for encoding in _TEXT_ENCODINGS:
+
+    best_text = ""
+    best_score = -10**9
+    for encoding in _DECODE_ORDER:
         try:
-            return raw.decode(encoding)
+            candidate = raw.decode(encoding)
         except (UnicodeDecodeError, LookupError):
             continue
-    return raw.decode("utf-8", errors="replace")
+        score = _decode_quality_score(candidate)
+        if score > best_score:
+            best_score = score
+            best_text = candidate
+
+    if best_text:
+        return _sanitize_decoded_text(best_text)
+
+    fallback = raw.decode("latin1", errors="replace")
+    fallback = fallback.replace(_MOJIBAKE_CHAR, "").replace("�", "")
+    fallback = _GARBLED_RUN.sub("", fallback)
+    fallback = _CONTROL_CHARS.sub("", fallback)
+    return _sanitize_decoded_text(fallback)
 
 
 def is_credential_line(text: str) -> bool:
@@ -312,6 +383,9 @@ def _blank_listing() -> dict[str, Any]:
         "notes": "",
         "login_email": "",
         "login_password": "",
+        "mail_password": "",
+        "old_password": "",
+        "secret_answer": "",
     }
 
 
@@ -458,6 +532,37 @@ def _apply_login_fields(item: dict[str, Any], source: str = "") -> dict[str, Any
     return item
 
 
+_LISTING_TEXT_FIELDS = (
+    "sku",
+    "title",
+    "game",
+    "rank",
+    "level",
+    "skins",
+    "emotes",
+    "extras",
+    "server",
+    "notes",
+    "login_email",
+    "login_password",
+    "mail_password",
+    "old_password",
+    "secret_answer",
+)
+
+
+def _sanitize_listing_row(item: dict[str, Any]) -> dict[str, Any]:
+    """Blank any grid field that is still mojibake after decoding/cleaning."""
+    for key in _LISTING_TEXT_FIELDS:
+        if key not in item:
+            continue
+        clean = _sanitize_field_value(str(item.get(key) or ""))
+        if key == "title":
+            clean = _clean_title(clean)
+        item[key] = clean
+    return item
+
+
 def _finalize_listing(row: dict[str, Any]) -> dict[str, Any]:
     item = _blank_listing()
     item.update({k: row.get(k, item[k]) for k in item if k in row or k in item})
@@ -474,8 +579,43 @@ def _finalize_listing(row: dict[str, Any]) -> dict[str, Any]:
         if not _norm(item.get(key)):
             item[key] = features.get(key) or ""
     item = _apply_login_fields(item, _norm(item.get("notes")))
+    item = _sanitize_listing_row(item)
     if not item["title"]:
         item["title"] = item["game"] or item["login_email"] or "GAME4ALL listing"
+    return item
+
+
+def listing_from_csv_cells(
+    row_cells: dict[str, Any],
+    header_map: dict[str, str | None],
+) -> dict[str, Any]:
+    """Map one CSV/Excel row (header → cell value) into a normalized inventory listing."""
+    mapped = _blank_listing()
+    notes_bits: list[str] = []
+    account_no = ""
+    for src, value in row_cells.items():
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        field = header_map.get(src)
+        if field == "account_no":
+            account_no = text
+            continue
+        if field and field != "combo":
+            mapped[field] = value
+        else:
+            notes_bits.append(f"{src}: {text}")
+    if account_no:
+        notes_bits.insert(0, f"Account #: {account_no}")
+        if not _norm(mapped.get("sku")):
+            mapped["sku"] = f"ACC-{account_no}"
+    if notes_bits:
+        mapped["notes"] = " | ".join(part for part in (mapped.get("notes"), *notes_bits) if part)
+    item = _finalize_listing(mapped)
+    if account_no and account_no not in (item.get("notes") or ""):
+        item["notes"] = " | ".join(part for part in (item.get("notes"), f"Account #: {account_no}") if part)
     return item
 
 
@@ -489,24 +629,15 @@ def _parse_csv(text: str) -> tuple[list[dict[str, Any]], int]:
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
     if not reader.fieldnames:
         return [], 0
-    mapping = {src: _map_header(src) for src in reader.fieldnames}
+    header_map = {src: _map_header(src) for src in reader.fieldnames}
     rows: list[dict[str, Any]] = []
     for raw in reader:
-        mapped: dict[str, Any] = _blank_listing()
-        notes_bits = []
-        for src, value in raw.items():
-            field = mapping.get(src)
-            if field:
-                mapped[field] = value
-            elif value:
-                notes_bits.append(f"{src}: {value}")
-        if notes_bits:
-            mapped["notes"] = " | ".join(part for part in (mapped.get("notes"), *notes_bits) if part)
-        item = _finalize_listing(mapped)
+        if not any(str(value or "").strip() for value in raw.values()):
+            continue
+        item = listing_from_csv_cells(raw, header_map)
         if item["login_email"] and item["login_password"]:
             imported += 1
-        if item["game"] or item["title"] or item["login_email"]:
-            rows.append(item)
+        rows.append(item)
     return rows, imported
 
 
@@ -607,9 +738,534 @@ def _is_noise_line(line: str) -> bool:
     return not stripped or stripped.startswith("#")
 
 
+EMAIL_ONLY = re.compile(r"^[^\s@]+@[^\s@]+\.[A-Za-z0-9.-]+$", re.IGNORECASE)
+BLOCK_SEPARATOR = re.compile(r"^\s*(?:[=\-*_~.]{3,}|[=\-*_~\s]{8,})\s*$")
+ACCOUNT_HEADER = re.compile(
+    r"""^\s*(?:[=\-*_~#\[\] ]*)
+    (?:
+        (?:account|acc|item|listing|n[o°]|رقم|الحساب|compte)\s*[#.:\-]*\s*\d+
+        | (?:account|acc)\s*[#.:\-]+\s*\d+
+        | (?:account|acc)\b
+        | \[\s*\d+\s*\]
+        | \#\s*\d+
+        | \d{1,4}\s*[.)\-](?:\s+\S+)?
+        | \d{1,4}\s*:\s+\S+
+    )
+    .*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+# More specific labels are tried first so "Mail Password" never becomes the email field
+# and "Epic Password" never falls through to the generic password matcher.
+_LABELED_SPECS: tuple[tuple[str, str], ...] = (
+    ("title", r"title|name|account\s*name|listing|العنوان|titre"),
+    ("game", r"game|jeu|اللعبة|لعبة"),
+    ("login_email", r"e[-_]?mail(?:\s*address)?|mail(?:\s*address)?|login|username|user|الإيميل|الايميل|الميل|البريد"),
+    (
+        "login_password",
+        r"epic(?:\s+games)?(?:\s*(?:password|pass|pwd))?|(?:password|pass|pwd)\s*(?:epic|game)|"
+        r"كلمة\s*سر(?:ة)?(?:\s*ال)?(?:[اأإآ]?يبك|epic)|باسورد\s*(?:ال)?(?:[اأإآ]?يبك|epic)",
+    ),
+    (
+        "mail_password",
+        r"(?:mail|email|inbox)\s*(?:password|pass|pwd)|(?:password|pass|pwd)\s*(?:mail|email|inbox)|"
+        r"كلمة\s*سر(?:ة)?(?:\s*ال)?(?:ميل|بريد)|باسورد\s*(?:ال)?(?:ميل|بريد)",
+    ),
+    (
+        "old_password",
+        r"old\s*(?:password|pass|pwd)|(?:password|pass|pwd)\s*old|previous\s*(?:password|pass|pwd)|"
+        r"former\s*(?:password|pass|pwd)|كلمة\s*سر(?:ة)?\s*قديم(?:ة)?|باسورد\s*قديم",
+    ),
+    (
+        "secret_answer",
+        r"secret\s*answer|security\s*answer|(?:secret|security)\s*ans|\bsqa\b|\bsa\b|answer|"
+        r"الإجابة\s*السرية|الجواب\s*(?:السري)?",
+    ),
+    ("secret_question", r"secret\s*question|security\s*question|\bsq\b|question|السؤال\s*السري"),
+    ("rank", r"rank|tier|elo|الرانك"),
+    ("level", r"level|lvl|niveau|المستوى"),
+    ("skins", r"skins?|cosmetics?|السكينات"),
+    ("emotes", r"emotes?|dances?"),
+    ("server", r"server|region|السيرفر|المنطقة"),
+    ("cost", r"cost|buy(?:_?price)?|prix_achat"),
+    ("list_price", r"list_price|sell(?:_?price)?|price|prix"),
+    ("platform", r"platform|marketplace|market|site"),
+    (
+        "login_password",
+        r"password|pass|passwd|pwd|mot\s*de\s*passe|كلمة\s*(?:ال)?سر(?:ة)?|باسورد",
+    ),
+)
+_LABEL_ONLY_RES: list[tuple[str, re.Pattern[str]]] = [
+    (field, re.compile(rf"^(?:{label_re})\s*$", re.IGNORECASE))
+    for field, label_re in _LABELED_SPECS
+]
+_ACCOUNT_DUMP_NAME = re.compile(r"(?:account|acc|fortnite|epic|valorant|combo|pack)", re.IGNORECASE)
+
+
+def _clean_display_line(line: str) -> str:
+    """Strip control characters / mojibake junk from a source line."""
+    text = (line or "").replace("\ufeff", "").replace("\u200b", "").replace("\xa0", " ")
+    text = _CONTROL_CHARS.sub("", text)
+    text = text.replace(_MOJIBAKE_CHAR, "").replace("�", "")
+    text = _GARBLED_RUN.sub("", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return text.strip()
+
+
+def _is_garbled_value(text: str) -> bool:
+    """True when a field is mostly corrupted encoding noise (???? / replacement chars)."""
+    value = _norm(text)
+    if not value:
+        return False
+    if _GARBLED_LINE.match(value):
+        return True
+    if re.match(r"^\?{2,}", value):
+        return True
+    if value.count("?") >= 3 and value.count("?") / len(value) >= 0.45:
+        return True
+    damaged = value.count(_MOJIBAKE_CHAR) + value.count("�")
+    return damaged >= max(1, len(value) // 2)
+
+
+def _sanitize_field_value(value: str) -> str:
+    """Remove leading ``?`` / odd symbols; blank the field if it is still garbled."""
+    text = _clean_display_line(value)
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'", "`"}:
+        text = text[1:-1].strip()
+    text = _GARBLED_FIELD_PREFIX.sub("", text).strip()
+    if _is_garbled_value(text):
+        return ""
+    return text
+
+
+def _clean_field_value(value: str) -> str:
+    return _sanitize_field_value(value)
+
+
+def _clean_title(value: str) -> str:
+    text = _clean_field_value(value)
+    text = re.sub(r"^[=\-*_~#\[\]\s]+", "", text)
+    text = re.sub(r"[=\-*_~#\[\]\s]+$", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" -:|")
+    return text
+
+
+def _game_from_filename(filename: str) -> str:
+    """Infer the game from names like C.FORTNITE.txt / fortnite_pack.txt."""
+    name = _norm(filename)
+    if not name:
+        return ""
+    stem = re.sub(r"\.[^.]+$", "", name)
+    stem = re.sub(r"^[A-Za-z]\.", "", stem)
+    blob = f"{stem} {name}".replace("_", " ").replace("-", " ")
+    for game in GAMES:
+        if re.search(rf"\b{re.escape(game)}\b", blob, re.IGNORECASE):
+            return "League of Legends" if game.lower() == "lol" else game
+    compact = re.sub(r"[^a-z0-9]+", "", stem.lower())
+    for game in GAMES:
+        key = re.sub(r"[^a-z0-9]+", "", game.lower())
+        if key and compact == key:
+            return "League of Legends" if game.lower() == "lol" else game
+    return ""
+
+
+def _labeled_match(line: str) -> tuple[str, str] | None:
+    stripped = _clean_display_line(line)
+    if not stripped:
+        return None
+    for field, label_re in _LABELED_SPECS:
+        match = re.match(rf"^(?:{label_re})\s*[:：=\-]\s*(.+)$", stripped, re.IGNORECASE)
+        if match:
+            return field, _clean_field_value(match.group(1))
+    return None
+
+
+def _is_label_only_line(line: str) -> str | None:
+    """Return the field name when a line is ONLY a label (value on the next line)."""
+    stripped = _clean_display_line(line)
+    if not stripped:
+        return None
+    for field, pattern in _LABEL_ONLY_RES:
+        if pattern.match(stripped):
+            return field
+    return None
+
+
+def _assign_block_field(mapped: dict[str, Any], field: str, value: str) -> None:
+    value = _clean_field_value(value)
+    if not value:
+        return
+    if field == "login_email":
+        combo_email, combo_password = split_login_combo(value)
+        mapped["login_email"] = mapped["login_email"] or combo_email or value
+        if combo_password:
+            mapped["login_password"] = mapped["login_password"] or combo_password
+    elif field == "login_password":
+        mapped["login_password"] = mapped["login_password"] or value
+    elif field == "mail_password":
+        mapped["mail_password"] = mapped["mail_password"] or value
+    elif field == "old_password":
+        mapped["old_password"] = mapped["old_password"] or value
+    elif field == "secret_answer":
+        mapped["secret_answer"] = mapped["secret_answer"] or value
+    elif field == "title":
+        mapped["title"] = mapped["title"] or _clean_title(value)
+    elif field in mapped and not _norm(mapped.get(field)):
+        mapped[field] = value
+
+
+def _is_comment_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped.startswith("#"):
+        return False
+    return not ACCOUNT_HEADER.match(stripped)
+
+
+def _is_account_header(line: str) -> bool:
+    stripped = _clean_display_line(line)
+    if not stripped or _labeled_match(stripped):
+        return False
+    if EMAIL_ONLY.match(stripped) or ("@" in stripped and "." in stripped):
+        return False
+    return bool(ACCOUNT_HEADER.match(stripped))
+
+
+def _header_title(line: str) -> str:
+    stripped = _clean_display_line(line)
+    rest = re.sub(
+        r"^\s*(?:[=\-*_~#\[\] ]*)(?:account|acc|item|listing|n[o°]|رقم|الحساب|compte)?\s*[#.:\-]*\s*\d+\s*[.):\-]?\s*",
+        "",
+        stripped,
+        flags=re.IGNORECASE,
+    )
+    rest = re.sub(r"^\[\s*\d+\s*\]\s*", "", rest)
+    return _clean_title(rest)
+
+
+def _looks_like_feature_text(text: str) -> bool:
+    lowered = text.lower()
+    if re.search(r"\d+\s+(?:skins?|emotes?|dances?|items?)", lowered):
+        return True
+    if any(game.lower() == lowered or game.lower() in lowered for game in GAMES):
+        return len(text.split()) >= 2
+    return False
+
+
+def _looks_like_one_line_pack(lines: list[str]) -> bool:
+    """True when almost every line is already a self-contained listing/combo row."""
+    if len(lines) <= 1:
+        return True
+    compact = 0
+    for ln in lines:
+        if "|" in ln or ";" in ln:
+            compact += 1
+            continue
+        email, password = split_login_combo(ln)
+        if email and password:
+            compact += 1
+            continue
+        if re.match(r"^(cost|buy|sell|price|lvl|level|rank|game|server|platform)\s*[=:]", ln, re.IGNORECASE):
+            compact += 1
+            continue
+    # Do NOT treat per-field labeled lines (Email : … / Epic Password : …) as compact rows —
+    # those are block-dump lines and must be grouped, not parsed one line = one table row.
+    return compact >= max(1, int(len(lines) * 0.65))
+
+
+def _looks_like_account_blocks(text: str, filename: str = "") -> bool:
+    """True when the file is a multi-line account dump (C.FORTNITE.txt style), not one row per line."""
+    if filename.lower().endswith(".csv"):
+        return False
+    lines = [_clean_display_line(ln) for ln in (text or "").splitlines()]
+    lines = [ln for ln in lines if ln and not _is_comment_line(ln)]
+    if len(lines) < 2:
+        return False
+    if _looks_like_one_line_pack(lines):
+        return False
+
+    headers = sum(1 for ln in lines if _is_account_header(ln))
+    label_only = sum(1 for ln in lines if _is_label_only_line(ln))
+    inline_labels = sum(1 for ln in lines if _labeled_match(ln))
+    emails = len(re.findall(r"[^\s@|;,]+@[^\s@]+\.[A-Za-z0-9.-]+", text or ""))
+    seps = sum(1 for ln in lines if BLOCK_SEPARATOR.match(ln))
+
+    if headers >= 1:
+        return True
+    if label_only >= 2:
+        return True
+    if inline_labels >= 2 and emails >= 1:
+        return True
+    if seps >= 1 and emails >= 1:
+        return True
+    if emails >= 1 and len(lines) >= emails * 3:
+        return True
+    if _ACCOUNT_DUMP_NAME.search(filename) and emails >= 1:
+        return True
+    # Any non-compact multiline TXT with at least one email is treated as a block dump —
+    # prevents "Email" / "Epic Password" label lines becoming separate table rows.
+    return emails >= 1
+
+
+def _should_use_block_parser(text: str, filename: str = "") -> bool:
+    """Decide whether a TXT upload must go through the block parser (never one-line-per-row)."""
+    if filename.lower().endswith(".csv"):
+        return False
+    payload = _sanitize_decoded_text((text or "").replace("\ufeff", "").strip())
+    lines = [_clean_display_line(ln) for ln in payload.splitlines()]
+    lines = [ln for ln in lines if ln and not _is_comment_line(ln)]
+    if len(lines) < 2:
+        return False
+    if _looks_like_one_line_pack(lines):
+        return False
+
+    # Files like C.FORTNITE.txt / fortnite_combo.txt are always block dumps.
+    if _ACCOUNT_DUMP_NAME.search(filename):
+        return True
+
+    return _looks_like_account_blocks(payload, filename)
+
+
+def _resplit_chunk_on_headers(lines: list[str]) -> list[list[str]]:
+    """If several ACCOUNT headers landed in one chunk, split again on each header."""
+    if sum(1 for ln in lines if _is_account_header(ln)) <= 1:
+        return [lines]
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if current and _is_account_header(line):
+            groups.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        groups.append(current)
+    return groups or [lines]
+
+
+def _split_account_blocks(text: str) -> list[str]:
+    """Cut a dump into one text blob per account."""
+    raw_lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_has_email = False
+
+    def flush() -> None:
+        nonlocal current, current_has_email
+        kept = [_clean_display_line(ln) for ln in current if not _is_comment_line(ln)]
+        kept = [ln for ln in kept if ln and not BLOCK_SEPARATOR.match(ln)]
+        if kept:
+            for group in _resplit_chunk_on_headers(kept):
+                if group:
+                    chunks.append(group)
+        current = []
+        current_has_email = False
+
+    for raw in raw_lines:
+        line = _clean_display_line(raw)
+        if _is_comment_line(raw):
+            continue
+        if not line:
+            continue
+        if BLOCK_SEPARATOR.match(line):
+            flush()
+            continue
+        labeled = _labeled_match(line)
+        is_email_label = bool(labeled and labeled[0] == "login_email")
+        is_bare_email = bool(EMAIL_ONLY.match(line))
+        is_label_only_email = _is_label_only_line(line) == "login_email"
+        starts_new_account = current and (
+            _is_account_header(line)
+            or (current_has_email and (is_email_label or is_bare_email or is_label_only_email))
+        )
+        if starts_new_account:
+            flush()
+        current.append(line)
+        if is_email_label or is_bare_email or is_label_only_email or split_login_combo(line)[0]:
+            current_has_email = True
+    flush()
+
+    if len(chunks) == 1:
+        emails_in_first = len(
+            re.findall(r"[^\s@|;,]+@[^\s@]+\.[A-Za-z0-9.-]+", "\n".join(chunks[0]))
+        )
+        if emails_in_first > 1:
+            chunks = _resplit_block_on_emails(chunks[0])
+
+    return ["\n".join(lines) for lines in chunks if any(lines)]
+
+
+def _resplit_block_on_emails(lines: list[str]) -> list[list[str]]:
+    """If one blob still holds several emails, start a new account at each extra email line."""
+    groups: list[list[str]] = []
+    current: list[str] = []
+    seen_email = False
+    for line in lines:
+        if _is_account_header(line):
+            if current:
+                groups.append(current)
+            current = [line]
+            seen_email = False
+            continue
+        labeled = _labeled_match(line)
+        is_email = (
+            (labeled and labeled[0] == "login_email")
+            or _is_label_only_line(line) == "login_email"
+            or bool(EMAIL_ONLY.match(line))
+            or bool(split_login_combo(line)[0])
+        )
+        if seen_email and is_email:
+            if current:
+                groups.append(current)
+            current = [line]
+            seen_email = bool(is_email)
+            continue
+        current.append(line)
+        if is_email:
+            seen_email = True
+    if current:
+        groups.append(current)
+    return groups or [lines]
+
+
+def _account_header_title(line: str) -> str:
+    rest = _header_title(line)
+    if rest:
+        return rest
+    cleaned = _clean_title(line)
+    if cleaned:
+        return cleaned
+    num = re.search(r"\d+", line or "")
+    return f"Account {num.group(0)}" if num else "Account"
+
+
+def _is_valid_account_row(item: dict[str, Any]) -> bool:
+    """Drop junk rows produced when a label line was parsed alone (Email, Epic Password, …)."""
+    if _norm(item.get("login_email")):
+        return True
+    if _norm(item.get("login_password")) and _norm(item.get("title")) and not _is_label_only_line(item["title"]):
+        return True
+    return False
+
+
+def _parse_account_block(block: str, filename: str = "") -> dict[str, Any]:
+    """Turn one multi-line account dump into a single inventory row."""
+    mapped = _blank_listing()
+    leftover: list[str] = []
+    unlabeled: list[str] = []
+    secret_question = ""
+    raw_lines = [
+        _clean_display_line(raw_line)
+        for raw_line in (block or "").splitlines()
+        if _clean_display_line(raw_line) and not BLOCK_SEPARATOR.match(_clean_display_line(raw_line))
+    ]
+
+    idx = 0
+    while idx < len(raw_lines):
+        line = raw_lines[idx]
+        if _is_account_header(line):
+            if not mapped["title"]:
+                mapped["title"] = _account_header_title(line)
+            idx += 1
+            continue
+
+        labeled = _labeled_match(line)
+        if labeled:
+            field, value = labeled
+            if field == "secret_question":
+                secret_question = secret_question or value
+            else:
+                _assign_block_field(mapped, field, value)
+            idx += 1
+            continue
+
+        label_only = _is_label_only_line(line)
+        if label_only:
+            nxt_idx = idx + 1
+            while nxt_idx < len(raw_lines) and not raw_lines[nxt_idx].strip():
+                nxt_idx += 1
+            if nxt_idx < len(raw_lines):
+                nxt = raw_lines[nxt_idx]
+                if not _is_account_header(nxt) and not _is_label_only_line(nxt) and not _labeled_match(nxt):
+                    if label_only == "secret_question":
+                        secret_question = secret_question or nxt
+                    else:
+                        _assign_block_field(mapped, label_only, nxt)
+                    idx = nxt_idx + 1
+                    continue
+            idx += 1
+            continue
+
+        combo_email, combo_password = split_login_combo(line)
+        if combo_email:
+            mapped["login_email"] = mapped["login_email"] or combo_email
+            mapped["login_password"] = mapped["login_password"] or combo_password
+            idx += 1
+            continue
+        if EMAIL_ONLY.match(line):
+            mapped["login_email"] = mapped["login_email"] or line
+            idx += 1
+            continue
+
+        unlabeled.append(line)
+        idx += 1
+
+    for item in unlabeled:
+        if not mapped["title"] and (_looks_like_feature_text(item) or len(item.split()) >= 2):
+            mapped["title"] = _clean_title(item)
+            continue
+        if not mapped["title"]:
+            mapped["title"] = _clean_title(item)
+            continue
+        if _looks_like_feature_text(item):
+            leftover.append(item)
+            continue
+        if not mapped["login_password"]:
+            mapped["login_password"] = item
+            continue
+        if not mapped["mail_password"]:
+            mapped["mail_password"] = item
+            continue
+        if not mapped["old_password"]:
+            mapped["old_password"] = item
+            continue
+        if not mapped["secret_answer"]:
+            mapped["secret_answer"] = item
+            continue
+        leftover.append(item)
+
+    if not mapped["login_email"]:
+        found = re.search(r"[^\s@|;,]+@[^\s@]+\.[A-Za-z0-9.-]+", block or "")
+        if found:
+            mapped["login_email"] = found.group(0)
+
+    if not mapped["game"]:
+        mapped["game"] = _game_from_filename(filename)
+
+    if leftover:
+        mapped["notes"] = " | ".join(dict.fromkeys(_clean_title(part) for part in leftover if _clean_title(part)))
+    if secret_question and secret_question.lower() not in (mapped.get("notes") or "").lower():
+        mapped["notes"] = " | ".join(part for part in (mapped.get("notes"), f"SQ: {secret_question}") if part)
+
+    item = _finalize_listing(mapped)
+    if item.get("login_email") and item["login_email"] in (item.get("notes") or ""):
+        item["notes"] = " | ".join(
+            part for part in (item.get("notes") or "").split(" | ") if item["login_email"] not in part
+        )
+    return item
+
+
 def parse_batch_text(text: str, filename: str = "") -> dict[str, Any]:
-    """Parse uploaded pack contents into listing dicts, including login combos."""
-    payload = (text or "").replace("\ufeff", "").strip()
+    """Parse uploaded pack contents into listing dicts, including login combos and block dumps."""
+    payload = _sanitize_decoded_text((text or "").replace("\ufeff", "").strip())
+    if _should_use_block_parser(payload, filename):
+        rows = []
+        for block in _split_account_blocks(payload):
+            item = _parse_account_block(block, filename)
+            if _is_valid_account_row(item):
+                rows.append(item)
+        imported = sum(1 for row in rows if _norm(row.get("login_email")) and _norm(row.get("login_password")))
+        return {"rows": rows, "imported_logins": imported, "filename": filename}
+
     body_lines = [line for line in payload.splitlines() if not _is_noise_line(line)]
     body = "\n".join(body_lines)
     header = body_lines[0] if body_lines else ""
@@ -623,8 +1279,6 @@ def parse_batch_text(text: str, filename: str = "") -> dict[str, Any]:
     if looks_csv and body:
         rows, imported = _parse_csv(body)
     if not rows:
-        # Every TXT line goes through the same parser: the combo becomes the delivery login
-        # and the remaining pipe fields still fill game / rank / prices.
         for line in body_lines:
             item = _parse_pipe_line(line)
             if item["game"] or item["title"] or item["login_email"]:

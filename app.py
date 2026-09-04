@@ -7,9 +7,12 @@ Run:
 from __future__ import annotations
 
 import importlib
+import io
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -48,9 +51,17 @@ generate_hyper_listing = parser_mod.generate_hyper_listing
 generate_sales_copy = parser_mod.generate_sales_copy
 parse_batch_text = parser_mod.parse_batch_text
 decode_upload_bytes = parser_mod.decode_upload_bytes
+listing_from_csv_cells = parser_mod.listing_from_csv_cells
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
+
+BOOT_PACK_ID = db.BOOT_PACK_ID
+BOOT_PACK_PATHS = tuple(db.discover_default_pack_paths()) or (
+    ROOT / "sample_data" / "accounts.csv",
+    ROOT / "sample_data" / "batch_pack_example.csv",
+    ROOT / "sample_data" / "batch_pack_example.txt",
+)
 
 THEMES = ("royal", "cyber", "dark")
 DESK_NAV = (
@@ -781,22 +792,123 @@ def init_auth_gate() -> None:
 
 
 def sync_inventory_state() -> pd.DataFrame:
-    """Initialize and refresh the session-level inventory mirror.
-
-    ``df_inventory`` / ``pack_uploaded`` start clean (empty frame, False) on a brand new
-    session and only flip on once a real batch pack has been parsed and imported — the app
-    ships with zero default or dummy data.
-    """
+    """Initialize and refresh the session-level inventory mirror from SQLite."""
     if "df_inventory" not in st.session_state:
         st.session_state.df_inventory = pd.DataFrame()
+    if "inventory" not in st.session_state:
+        st.session_state.inventory = pd.DataFrame()
     if "pack_uploaded" not in st.session_state:
         st.session_state.pack_uploaded = False
+    preserve_preview = bool(st.session_state.get("preview_rows"))
+    return pull_inventory_from_db(preserve_preview=preserve_preview)
 
+
+def pull_inventory_from_db(*, preserve_preview: bool = False) -> pd.DataFrame:
+    """Reload inventory from SQLite into session state and rebuild the display grid."""
     frame = db.inventory_frame()
     st.session_state.df_inventory = frame
-    if not frame.empty:
-        st.session_state.pack_uploaded = True
+    if frame.empty:
+        if not preserve_preview:
+            st.session_state.pack_uploaded = False
+        return frame
+
+    st.session_state.pack_uploaded = True
+    if preserve_preview:
+        return frame
+
+    field_labels = st.session_state.get("inventory_field_labels") or {}
+    pack_filter = str(st.session_state.get("inventory_pack_filter") or "All")
+    if pack_filter != "All" and "pack_id" in frame.columns:
+        filtered = frame[frame["pack_id"].astype(str) == pack_filter]
+    else:
+        filtered = frame
+    st.session_state.inventory = build_stock_display(filtered, field_labels, pack_filter)
     return frame
+
+
+def inventory_metrics_live() -> dict[str, int]:
+    """Metrics from SQLite first; fall back to pending preview rows while importing."""
+    try:
+        counts = db.inventory_counts()
+        if counts["total"] > 0:
+            return counts
+    except Exception:
+        pass
+
+    preview = st.session_state.get("preview_rows") or []
+    if preview:
+        listed = sum(1 for row in preview if str(row.get("status") or "").strip() == "Listed")
+        sold = sum(1 for row in preview if str(row.get("status") or "").strip() == "Sold")
+        available = sum(
+            1
+            for row in preview
+            if str(row.get("status") or "Available").strip() in {"", "Available"}
+        )
+        return {
+            "total": len(preview),
+            "Available": available,
+            "Listed": listed,
+            "Sold": sold,
+        }
+    return inventory_metrics_from_state(st.session_state.get("df_inventory", pd.DataFrame()))
+
+
+def _normalize_upload_cell(value: Any) -> Any:
+    if pd.isna(value):
+        return ""
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return value
+
+
+def resolve_import_rows() -> tuple[list[dict[str, Any]], dict[str, str], pd.DataFrame]:
+    """Build listing dicts from the uploaded spreadsheet (1:1 with the preview table)."""
+    field_labels = dict(st.session_state.get("inventory_field_labels") or {})
+
+    pending_df = st.session_state.get("pending_upload_df")
+    if isinstance(pending_df, pd.DataFrame) and not pending_df.empty:
+        rows, labels = listings_from_dataframe(pending_df, field_labels)
+        return rows, labels, pending_df.copy()
+
+    inventory_df = st.session_state.get("inventory")
+    if isinstance(inventory_df, pd.DataFrame) and not inventory_df.empty:
+        rows, labels = listings_from_dataframe(inventory_df, field_labels)
+        return rows, labels, inventory_df.copy()
+
+    preview_rows = list(st.session_state.get("preview_rows") or [])
+    return preview_rows, field_labels, pd.DataFrame()
+
+
+def import_pack_to_stock(pack_id: str) -> int:
+    """Parse, insert, and refresh every row from the active CSV upload."""
+    rows, field_labels, source_df = resolve_import_rows()
+    if not rows:
+        return 0
+
+    st.session_state.inventory_field_labels = field_labels
+    inserted = db.insert_listings(rows, pack_id)
+    if inserted <= 0:
+        return 0
+
+    if isinstance(source_df, pd.DataFrame) and not source_df.empty:
+        snapshots = dict(st.session_state.get("inventory_snapshots") or {})
+        snapshots[pack_id] = source_df.copy()
+        st.session_state.inventory_snapshots = snapshots
+
+    db.set_setting("inventory_user_cleared", "0")
+    st.session_state.preview_rows = []
+    st.session_state.preview_imported = 0
+    st.session_state.pending_upload_df = pd.DataFrame()
+    st.session_state.inventory_pack_filter = pack_id
+
+    pull_inventory_from_db(preserve_preview=False)
+    pack_frame = db.inventory_frame(pack_id=pack_id)
+    if isinstance(source_df, pd.DataFrame) and not source_df.empty:
+        st.session_state.inventory = attach_db_ids(source_df, pack_frame)
+    return inserted
 
 
 # Every non-widget session_state key that a batch-pack upload can populate — cleared by
@@ -804,6 +916,10 @@ def sync_inventory_state() -> pd.DataFrame:
 _UPLOAD_RELATED_STATE_KEYS = (
     "preview_rows",
     "preview_imported",
+    "inventory",
+    "inventory_field_labels",
+    "inventory_snapshots",
+    "pending_upload_df",
     "pack_name",
     "current_parsed_account",
     "listing_pack",
@@ -839,7 +955,9 @@ def reset_inventory_state() -> None:
     populated, then reruns so every tab redraws against a genuinely empty inventory.
     """
     db.clear_inventory()
+    db.set_setting("inventory_user_cleared", "1")
     st.session_state.df_inventory = pd.DataFrame()
+    st.session_state.inventory = pd.DataFrame()
     st.session_state.pack_uploaded = False
     for key in _UPLOAD_RELATED_STATE_KEYS:
         st.session_state.pop(key, None)
@@ -1451,11 +1569,29 @@ def tab_customers_delivery() -> None:
         delivery_grid = pd.DataFrame(accounts)
         grid_cols = [
             col
-            for col in ("id", "sku", "title", "game", "status", "platform", "login_email", "login_password")
+            for col in (
+                "id",
+                "sku",
+                "title",
+                "game",
+                "status",
+                "platform",
+                "login_email",
+                "login_password",
+                "mail_password",
+                "old_password",
+                "secret_answer",
+            )
             if col in delivery_grid.columns
         ]
         delivery_grid = delivery_grid[grid_cols].rename(
-            columns={"login_email": tr("col_email"), "login_password": tr("col_password")}
+            columns={
+                "login_email": tr("col_email"),
+                "login_password": tr("col_epic_password"),
+                "mail_password": tr("col_mail_password"),
+                "old_password": tr("col_old_password"),
+                "secret_answer": tr("col_secret_answer"),
+            }
         )
         st.dataframe(
             delivery_grid,
@@ -1463,7 +1599,10 @@ def tab_customers_delivery() -> None:
             hide_index=True,
             column_config={
                 tr("col_email"): st.column_config.TextColumn(tr("col_email"), width="medium"),
-                tr("col_password"): st.column_config.TextColumn(tr("col_password"), width="medium"),
+                tr("col_epic_password"): st.column_config.TextColumn(tr("col_epic_password"), width="medium"),
+                tr("col_mail_password"): st.column_config.TextColumn(tr("col_mail_password"), width="medium"),
+                tr("col_old_password"): st.column_config.TextColumn(tr("col_old_password"), width="medium"),
+                tr("col_secret_answer"): st.column_config.TextColumn(tr("col_secret_answer"), width="medium"),
             },
         )
     else:
@@ -1496,10 +1635,21 @@ def tab_customers_delivery() -> None:
         st.text_input("Email", key="crm_login_email", placeholder="account@email.com")
     with pass_col:
         st.text_input("Password", key="crm_login_password", placeholder="••••••••")
-    login_pack = (
-        f"Email: {st.session_state.get('crm_login_email') or '—'}\n"
-        f"Password: {st.session_state.get('crm_login_password') or '—'}"
-    )
+    login_pack_lines = [
+        f"Email: {st.session_state.get('crm_login_email') or '—'}",
+        f"Epic Password: {st.session_state.get('crm_login_password') or '—'}",
+    ]
+    extra_account = chosen or bound_account or {}
+    mail_pw = str(extra_account.get("mail_password") or "").strip()
+    old_pw = str(extra_account.get("old_password") or "").strip()
+    secret = str(extra_account.get("secret_answer") or "").strip()
+    if mail_pw:
+        login_pack_lines.append(f"Mail Password: {mail_pw}")
+    if old_pw:
+        login_pack_lines.append(f"Old Password: {old_pw}")
+    if secret:
+        login_pack_lines.append(f"Secret Answer: {secret}")
+    login_pack = "\n".join(login_pack_lines)
     st.markdown(f"**{tr('crm_copy_login_title')}**")
     st.code(login_pack, language="text")
 
@@ -1824,9 +1974,105 @@ def tab_listing_generator() -> None:
 
 def parse_uploaded_pack(raw: str, filename: str) -> dict:
     """Read TXT/CSV packs and keep every email/password combo as an inventory delivery login."""
+    if filename.lower().endswith(".csv"):
+        try:
+            df, rows, field_labels = read_csv_pack(raw)
+            if not df.empty or rows:
+                imported = sum(
+                    1
+                    for row in rows
+                    if str(row.get("login_email") or "").strip() and str(row.get("login_password") or "").strip()
+                )
+                return {
+                    "rows": rows,
+                    "imported_logins": imported,
+                    "filename": filename,
+                    "display_df": df,
+                    "field_labels": field_labels,
+                }
+        except Exception:
+            pass
     parsed = parse_batch_text(raw, filename)
     parsed["imported_logins"] = int(parsed.get("imported_logins") or 0)
     return parsed
+
+
+def read_csv_pack(raw: str) -> tuple[pd.DataFrame, list[dict[str, Any]], dict[str, str]]:
+    """Parse a CSV upload with pandas so preview, import, and DB rows stay row-for-row aligned."""
+    df = pd.read_csv(io.StringIO(raw))
+    df = df.dropna(how="all")
+    if df.empty:
+        return df, [], {}
+
+    header_map = {str(col): parser_mod._map_header(str(col)) for col in df.columns}
+    field_labels = {
+        field: str(col)
+        for col in df.columns
+        if (field := header_map.get(str(col)))
+    }
+    rows: list[dict[str, Any]] = []
+    for record in df.to_dict("records"):
+        cells = {str(key): _normalize_upload_cell(value) for key, value in record.items()}
+        rows.append(listing_from_csv_cells(cells, header_map))
+    return df, rows, field_labels
+
+
+def listings_from_dataframe(
+    dataframe: pd.DataFrame,
+    field_labels: dict[str, str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Convert a displayed inventory dataframe back into normalized listing dicts."""
+    frame = dataframe.copy()
+    if "ID" in frame.columns:
+        frame = frame.drop(columns=["ID"])
+    header_map = {str(col): parser_mod._map_header(str(col)) for col in frame.columns}
+    labels = field_labels or {
+        field: str(col)
+        for col in frame.columns
+        if (field := header_map.get(str(col)))
+    }
+    rows: list[dict[str, Any]] = []
+    for record in frame.to_dict("records"):
+        cells = {str(key): _normalize_upload_cell(value) for key, value in record.items()}
+        if not any(str(value).strip() for value in cells.values()):
+            continue
+        rows.append(listing_from_csv_cells(cells, header_map))
+    return rows, labels
+
+
+def attach_db_ids(upload_df: pd.DataFrame, db_frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep the exact uploaded CSV layout and attach DB ids in row order."""
+    display = upload_df.copy().reset_index(drop=True)
+    if db_frame is None or db_frame.empty or "id" not in db_frame.columns:
+        return display
+    ids = db_frame.sort_values("id")["id"].tolist()
+    if len(ids) >= len(display):
+        ids = ids[-len(display) :]
+    if len(ids) == len(display):
+        display.insert(0, "ID", ids)
+    return display
+
+
+def build_stock_display(
+    db_frame: pd.DataFrame,
+    field_labels: dict[str, str],
+    pack_filter: str,
+) -> pd.DataFrame:
+    """Render stock using the saved upload snapshot when available, else mapped DB columns."""
+    snapshots = st.session_state.get("inventory_snapshots") or {}
+    if pack_filter != "All" and pack_filter in snapshots and not db_frame.empty:
+        snap = snapshots[pack_filter].copy().reset_index(drop=True)
+        return attach_db_ids(snap, db_frame)
+    if pack_filter == "All" and snapshots and not db_frame.empty:
+        parts: list[pd.DataFrame] = []
+        for pack_id, snap in snapshots.items():
+            pack_rows = db_frame[db_frame["pack_id"].astype(str) == str(pack_id)] if "pack_id" in db_frame.columns else db_frame
+            if pack_rows.empty:
+                continue
+            parts.append(attach_db_ids(snap.copy().reset_index(drop=True), pack_rows))
+        if parts:
+            return pd.concat(parts, ignore_index=True)
+    return db_frame_to_inventory_df(db_frame, field_labels)
 
 
 def render_security_action() -> None:
@@ -1938,16 +2184,313 @@ def inventory_metrics_from_state(df_inventory: pd.DataFrame) -> dict[str, int]:
     }
 
 
+# Canonical column order for batch preview + inventory stock tables — one row per account.
+_INVENTORY_TABLE_FIELDS = (
+    "account_no",
+    "sku",
+    "title",
+    "game",
+    "login_email",
+    "login_password",
+    "mail_password",
+    "old_password",
+    "secret_answer",
+    "rank",
+    "level",
+    "skins",
+    "emotes",
+    "server",
+    "extras",
+    "cost",
+    "list_price",
+    "platform",
+    "status",
+    "notes",
+)
+
+
+def _inventory_source_labels() -> dict[str, str]:
+    return {
+        "account_no": tr("col_account_no"),
+        "id": "ID",
+        "pack_id": tr("col_pack"),
+        "sku": tr("col_sku"),
+        "title": tr("col_title"),
+        "game": tr("col_game"),
+        "login_email": tr("col_email"),
+        "login_password": tr("col_epic_password"),
+        "mail_password": tr("col_mail_password"),
+        "old_password": tr("col_old_password"),
+        "secret_answer": tr("col_secret_answer"),
+        "rank": tr("col_rank"),
+        "level": tr("col_level"),
+        "skins": tr("col_skins"),
+        "emotes": tr("col_emotes"),
+        "server": tr("col_server"),
+        "extras": tr("feat_extras"),
+        "cost": tr("col_cost"),
+        "list_price": tr("col_list"),
+        "platform": tr("col_platform"),
+        "status": tr("col_status"),
+        "notes": tr("col_notes"),
+    }
+
+
+def _inventory_table_column_config() -> dict[str, Any]:
+    text_medium = {
+        tr("col_email"): st.column_config.TextColumn(tr("col_email"), width="medium"),
+        tr("col_epic_password"): st.column_config.TextColumn(tr("col_epic_password"), width="medium"),
+        tr("col_mail_password"): st.column_config.TextColumn(tr("col_mail_password"), width="medium"),
+        tr("col_old_password"): st.column_config.TextColumn(tr("col_old_password"), width="medium"),
+        tr("col_secret_answer"): st.column_config.TextColumn(tr("col_secret_answer"), width="medium"),
+        tr("col_title"): st.column_config.TextColumn(tr("col_title"), width="medium"),
+        tr("col_notes"): st.column_config.TextColumn(tr("col_notes"), width="medium"),
+    }
+    return {
+        **text_medium,
+        tr("col_account_no"): st.column_config.NumberColumn(tr("col_account_no"), format="%d"),
+        tr("col_cost"): st.column_config.NumberColumn(format="%.2f"),
+        tr("col_list"): st.column_config.NumberColumn(format="%.2f"),
+        tr("col_status"): st.column_config.SelectboxColumn(options=["Available", "Listed", "Sold"]),
+        tr("col_platform"): st.column_config.SelectboxColumn(options=list(PLATFORMS)),
+    }
+
+
+def build_inventory_table(
+    rows: pd.DataFrame | list[dict[str, Any]],
+    *,
+    include_id: bool = False,
+    include_pack: bool = False,
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Build a display-ready inventory table and a label→field reverse map for saves."""
+    frame = pd.DataFrame(rows).copy() if isinstance(rows, list) else rows.copy()
+    if frame.empty:
+        return frame, {}
+
+    if "account_no" not in frame.columns:
+        frame.insert(0, "account_no", range(1, len(frame) + 1))
+
+    for field in _INVENTORY_TABLE_FIELDS:
+        if field == "account_no" or field in frame.columns:
+            continue
+        if field in {"cost", "list_price"}:
+            frame[field] = 0.0
+        else:
+            frame[field] = ""
+
+    order: list[str] = []
+    if include_id and "id" in frame.columns:
+        order.append("id")
+    if include_pack and "pack_id" in frame.columns:
+        order.append("pack_id")
+    order.extend(field for field in _INVENTORY_TABLE_FIELDS if field in frame.columns)
+    for col in frame.columns:
+        if col not in order:
+            order.append(col)
+    frame = frame[order]
+
+    labels = _inventory_source_labels()
+    rename = {src: labels[src] for src in frame.columns if src in labels}
+    display = frame.rename(columns=rename)
+    reverse_map = {label: src for src, label in rename.items()}
+    return display, reverse_map
+
+
+def build_upload_inventory_df(
+    raw: str,
+    filename: str,
+    rows: list[dict[str, Any]],
+    *,
+    display_df: pd.DataFrame | None = None,
+    field_labels: dict[str, str] | None = None,
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Mirror the uploaded spreadsheet: raw CSV columns or a full parsed account grid."""
+    if display_df is not None and not display_df.empty:
+        return display_df.copy(), field_labels or {}
+
+    if filename.lower().endswith(".csv"):
+        try:
+            df, parsed_rows, labels = read_csv_pack(raw)
+            if not df.empty:
+                return df.copy(), labels
+            if parsed_rows:
+                return pd.DataFrame(parsed_rows), labels
+        except Exception:
+            pass
+
+    if not rows:
+        return pd.DataFrame(), field_labels or {}
+
+    field_labels = dict(field_labels or {})
+    frame = pd.DataFrame(rows)
+    labels = _inventory_source_labels()
+    for field in _INVENTORY_TABLE_FIELDS:
+        if field in frame.columns:
+            continue
+        if field in {"cost", "list_price"}:
+            frame[field] = 0.0
+        else:
+            frame[field] = ""
+
+    display_cols: dict[str, Any] = {labels["account_no"]: range(1, len(frame) + 1)}
+    field_labels["account_no"] = labels["account_no"]
+    for field in _INVENTORY_TABLE_FIELDS:
+        if field == "account_no":
+            continue
+        label = labels.get(field, field)
+        field_labels[field] = label
+        display_cols[label] = frame[field].tolist()
+    return pd.DataFrame(display_cols), field_labels
+
+
+def db_frame_to_inventory_df(
+    db_frame: pd.DataFrame,
+    field_labels: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Rebuild the session inventory grid from DB rows using the upload's column layout."""
+    if db_frame is None or db_frame.empty:
+        return pd.DataFrame()
+
+    labels = field_labels or {}
+    if labels:
+        data: dict[str, Any] = {}
+        for field, label in labels.items():
+            if field == "account_no":
+                data[label] = range(1, len(db_frame) + 1)
+                continue
+            if field in db_frame.columns:
+                data[label] = db_frame[field].tolist()
+        display = pd.DataFrame(data)
+        if "id" in db_frame.columns:
+            display.insert(0, "ID", db_frame["id"].tolist())
+        return display
+
+    display, _ = build_inventory_table(db_frame, include_id=True, include_pack=True)
+    return display
+
+
+def _inventory_grid_column_config(columns: list[str]) -> dict[str, Any]:
+    cfg: dict[str, Any] = {}
+    cost_names = {tr("col_cost"), "cost", "Cost", "COST"}
+    list_names = {tr("col_list"), "list_price", "List Price", "list price"}
+    status_names = {tr("col_status"), "status", "Status"}
+    platform_names = {tr("col_platform"), "platform", "Platform"}
+    for col in columns:
+        if col in cost_names:
+            cfg[col] = st.column_config.NumberColumn(format="%.2f")
+        elif col in list_names:
+            cfg[col] = st.column_config.NumberColumn(format="%.2f")
+        elif col in status_names:
+            cfg[col] = st.column_config.SelectboxColumn(options=["Available", "Listed", "Sold"])
+        elif col in platform_names:
+            cfg[col] = st.column_config.SelectboxColumn(options=list(PLATFORMS))
+    return cfg
+
+
+def render_session_inventory_grid(
+    dataframe: pd.DataFrame,
+    *,
+    title_key: str,
+    help_key: str,
+    rows_key: str,
+    editable: bool = False,
+    editor_key: str = "inventory_editor",
+) -> pd.DataFrame | None:
+    """Render the unified upload/stock spreadsheet grid."""
+    if dataframe is None or dataframe.empty:
+        return None
+
+    st.markdown(f"**{tr(title_key)}**")
+    st.caption(tr(help_key))
+    st.caption(tr(rows_key, n=len(dataframe)))
+    table_height = min(720, max(240, 38 + len(dataframe) * 36))
+    column_config = _inventory_grid_column_config(list(dataframe.columns))
+    if editable:
+        disabled = ["ID"] if "ID" in dataframe.columns else []
+        return st.data_editor(
+            dataframe,
+            width="stretch",
+            hide_index=True,
+            disabled=disabled,
+            column_config=column_config,
+            height=table_height,
+            key=editor_key,
+        )
+
+    st.dataframe(
+        dataframe,
+        width="stretch",
+        hide_index=True,
+        column_config=column_config,
+        height=table_height,
+    )
+    return dataframe.copy()
+
+
+def render_inventory_table(
+    rows: pd.DataFrame | list[dict[str, Any]],
+    *,
+    title_key: str,
+    help_key: str,
+    rows_key: str,
+    include_id: bool = False,
+    include_pack: bool = False,
+    editable: bool = False,
+    editor_key: str = "inventory_editor",
+) -> tuple[pd.DataFrame | None, dict[str, str]]:
+    """Render the unified batch/inventory account table."""
+    display, reverse_map = build_inventory_table(
+        rows,
+        include_id=include_id,
+        include_pack=include_pack,
+    )
+    if display.empty:
+        return None, reverse_map
+
+    st.markdown(f"**{tr(title_key)}**")
+    st.caption(tr(help_key))
+    st.caption(tr(rows_key, n=len(display)))
+    table_height = min(720, max(240, 38 + len(display) * 36))
+    if editable:
+        id_label = next((label for label, src in reverse_map.items() if src == "id"), "ID")
+        edited = st.data_editor(
+            display,
+            width="stretch",
+            hide_index=True,
+            disabled=[id_label] if include_id and id_label in display.columns else [],
+            column_config=_inventory_table_column_config(),
+            height=table_height,
+            key=editor_key,
+        )
+        return edited, reverse_map
+
+    st.dataframe(
+        display,
+        width="stretch",
+        hide_index=True,
+        column_config=_inventory_table_column_config(),
+        height=table_height,
+    )
+    return display, reverse_map
+
+
 def tab_inventory() -> None:
     if "df_inventory" not in st.session_state:
         st.session_state.df_inventory = pd.DataFrame()
-    df_inventory = st.session_state.df_inventory
-    counts = inventory_metrics_from_state(df_inventory)
+    if "inventory" not in st.session_state:
+        st.session_state.inventory = pd.DataFrame()
+
+    preview_rows = st.session_state.get("preview_rows") or []
+    preserve_preview = bool(preview_rows)
+    pull_inventory_from_db(preserve_preview=preserve_preview)
+    counts = inventory_metrics_live()
     m1, m2, m3, m4 = st.columns(4)
     m1.metric(tr("stock_total"), counts["total"])
     m2.metric(tr("stock_available"), counts["Available"])
     m3.metric(tr("stock_listed"), counts["Listed"])
     m4.metric(tr("stock_sold"), counts["Sold"])
+
+    df_inventory = st.session_state.df_inventory
 
     st.subheader(tr("upload_title"))
     st.caption(tr("upload_help"))
@@ -1965,60 +2508,50 @@ def tab_inventory() -> None:
         st.caption(tr("reset_all_help"))
 
     if uploaded is not None:
-        # Auto-detect encoding instead of assuming UTF-8 — a TXT/combo pack exported from
-        # Notepad/Excel on a non-English Windows locale is very often "ANSI" (cp1256 for
-        # Arabic, cp1252 for Western Europe), and forcing strict UTF-8 on that scrambles
-        # every non-ASCII byte into "�"/"?" noise, which is exactly what throws off column
-        # alignment in the preview table.
         raw = decode_upload_bytes(uploaded.getvalue())
         parsed = parse_uploaded_pack(raw, uploaded.name)
+        display_df, field_labels = build_upload_inventory_df(
+            raw,
+            uploaded.name,
+            parsed["rows"],
+            display_df=parsed.get("display_df"),
+            field_labels=parsed.get("field_labels"),
+        )
+        st.session_state.inventory = display_df
+        st.session_state.inventory_field_labels = field_labels
+        st.session_state.pending_upload_df = display_df.copy()
         st.session_state.preview_rows = parsed["rows"]
         st.session_state.preview_imported = int(parsed.get("imported_logins") or 0)
         st.session_state.pack_name = pack_name
+        preview_rows = parsed["rows"]
 
-    preview = st.session_state.get("preview_rows") or []
     imported_logins = int(st.session_state.get("preview_imported") or 0)
     if imported_logins:
         st.success(tr("imported_creds", n=imported_logins))
-    if preview:
-        preview_frame = pd.DataFrame(preview)
-        preferred = [
-            "title",
-            "game",
-            "login_email",
-            "login_password",
-            "rank",
-            "level",
-            "server",
-            "platform",
-            "cost",
-            "list_price",
-            "notes",
-        ]
-        ordered = [col for col in preferred if col in preview_frame.columns]
-        ordered += [col for col in preview_frame.columns if col not in ordered]
-        preview_frame = preview_frame[ordered].rename(
-            columns={"login_email": tr("col_email"), "login_password": tr("col_password")}
-        )
-        st.dataframe(
-            preview_frame,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                tr("col_email"): st.column_config.TextColumn(tr("col_email"), width="medium"),
-                tr("col_password"): st.column_config.TextColumn(tr("col_password"), width="medium"),
-            },
-        )
-        if st.button(tr("import_button"), type="primary"):
-            n = db.insert_listings(preview, pack_name.strip() or "PACK")
-            st.session_state.preview_rows = []
-            st.session_state.preview_imported = 0
-            st.session_state.df_inventory = db.inventory_frame()
-            st.session_state.pack_uploaded = True
-            flash("success", tr("imported_ok", n=n, pack=pack_name))
-            st.rerun()
-    elif uploaded is not None:
-        st.info(tr("parse_empty"))
+
+    inventory = st.session_state.get("inventory", pd.DataFrame())
+    is_preview = bool(preview_rows)
+
+    if is_preview:
+        if inventory is not None and not inventory.empty:
+            render_session_inventory_grid(
+                inventory,
+                title_key="preview_table_title",
+                help_key="preview_table_help",
+                rows_key="preview_table_rows",
+                editable=False,
+            )
+            if st.button(tr("import_button"), type="primary"):
+                pack_id = pack_name.strip() or "PACK"
+                n = import_pack_to_stock(pack_id)
+                if n <= 0:
+                    flash("error", tr("parse_empty"))
+                else:
+                    flash("success", tr("imported_ok", n=n, pack=pack_name))
+                st.rerun()
+        elif uploaded is not None:
+            st.info(tr("parse_empty"))
+        return
 
     df_inventory = st.session_state.df_inventory
     if df_inventory is None or df_inventory.empty:
@@ -2030,8 +2563,10 @@ def tab_inventory() -> None:
 
     packs = ["All", *sorted({str(v) for v in df_inventory.get("pack_id", pd.Series(dtype=str)) if str(v).strip()})]
     games = ["All", *sorted({str(v) for v in df_inventory.get("game", pd.Series(dtype=str)) if str(v).strip()})]
+    default_pack = st.session_state.pop("inventory_pack_filter", None)
+    pack_default_index = packs.index(default_pack) if default_pack in packs else 0
     f1, f2, f3 = st.columns(3)
-    pack_filter = f1.selectbox(tr("pack_filter"), packs)
+    pack_filter = f1.selectbox(tr("pack_filter"), packs, index=pack_default_index)
     status_filter = f2.selectbox(tr("status_filter"), ["All", "Available", "Listed", "Sold"])
     game_filter = f3.selectbox(tr("game_filter"), games)
 
@@ -2048,108 +2583,57 @@ def tab_inventory() -> None:
         st.info(tr("empty_stock"))
         return
 
-    display_cols = [
-            "id",
-            "pack_id",
-            "sku",
-            "title",
-            "game",
-            "login_email",
-            "login_password",
-            "rank",
-            "level",
-            "skins",
-            "emotes",
-            "server",
-            "cost",
-            "list_price",
-            "platform",
-            "status",
-            "notes",
-        ]
-    display_cols = [col for col in display_cols if col in frame.columns]
-    display = frame[display_cols].copy()
-    rename = {
-        "pack_id": tr("col_pack"),
-        "sku": tr("col_sku"),
-        "title": tr("col_title"),
-        "game": tr("col_game"),
-        "rank": tr("col_rank"),
-        "level": tr("col_level"),
-        "skins": tr("col_skins"),
-        "emotes": tr("col_emotes"),
-        "server": tr("col_server"),
-        "cost": tr("col_cost"),
-        "list_price": tr("col_list"),
-        "platform": tr("col_platform"),
-        "status": tr("col_status"),
-        "login_email": tr("col_email"),
-        "login_password": tr("col_password"),
-        "notes": tr("col_notes"),
-    }
-    display = display.rename(columns={src: dest for src, dest in rename.items() if src in display.columns})
-    login_cols = [
-        col
-        for col in ("id", tr("col_sku"), tr("col_title"), tr("col_game"), tr("col_email"), tr("col_password"), tr("col_status"))
-        if col in display.columns
-    ]
-    st.markdown("**Inventory grid — Email / Password**")
-    st.dataframe(
-        display[login_cols],
-        width="stretch",
-        hide_index=True,
-        column_config={
-            tr("col_email"): st.column_config.TextColumn(tr("col_email"), width="medium"),
-            tr("col_password"): st.column_config.TextColumn(tr("col_password"), width="medium"),
-        },
+    field_labels = st.session_state.get("inventory_field_labels") or {}
+    stock_grid = build_stock_display(frame, field_labels, pack_filter)
+    st.session_state.inventory = stock_grid
+    edited = render_session_inventory_grid(
+        stock_grid,
+        title_key="inventory_table_title",
+        help_key="inventory_table_help",
+        rows_key="inventory_table_rows",
+        editable=True,
+        editor_key="inventory_editor",
     )
-    edited = st.data_editor(
-        display,
-        width="stretch",
-        hide_index=True,
-        disabled=["id"],
-        column_config={
-            tr("col_status"): st.column_config.SelectboxColumn(options=["Available", "Listed", "Sold"]),
-            tr("col_platform"): st.column_config.SelectboxColumn(options=list(PLATFORMS)),
-            tr("col_cost"): st.column_config.NumberColumn(format="%.2f"),
-            tr("col_list"): st.column_config.NumberColumn(format="%.2f"),
-            tr("col_email"): st.column_config.TextColumn(tr("col_email"), width="medium"),
-            tr("col_password"): st.column_config.TextColumn(tr("col_password"), width="medium"),
-        },
-        key="inventory_editor",
-    )
+    if edited is None:
+        return
+
+    label_to_field = {label: field for field, label in field_labels.items()}
     b1, b2, b3 = st.columns([1, 1, 1.2])
     if b1.button(tr("save_grid"), type="primary"):
-        field_map = {
-            tr("col_pack"): "pack_id",
-            tr("col_sku"): "sku",
-            tr("col_title"): "title",
-            tr("col_game"): "game",
-            tr("col_rank"): "rank",
-            tr("col_level"): "level",
-            tr("col_skins"): "skins",
-            tr("col_emotes"): "emotes",
-            tr("col_server"): "server",
-            tr("col_cost"): "cost",
-            tr("col_list"): "list_price",
-            tr("col_platform"): "platform",
-            tr("col_status"): "status",
-            tr("col_email"): "login_email",
-            tr("col_password"): "login_password",
-            tr("col_notes"): "notes",
-        }
         for _, row in edited.iterrows():
-            payload = {dest: row[src] for src, dest in field_map.items() if src in row}
-            db.update_inventory_row(int(row["id"]), payload)
+            row_id = None
+            if "ID" in row:
+                row_id = int(row["ID"])
+            if row_id is None:
+                continue
+            if label_to_field:
+                payload = {
+                    field: row[label]
+                    for label, field in label_to_field.items()
+                    if label in row and field not in {"account_no", "id"}
+                }
+            else:
+                _, field_map = build_inventory_table(frame, include_id=True, include_pack=True)
+                payload = {
+                    dest: row[label]
+                    for label, dest in field_map.items()
+                    if label in row and dest not in {"account_no", "id"}
+                }
+            db.update_inventory_row(row_id, payload)
+        st.session_state.inventory_pack_filter = pack_filter
+        pull_inventory_from_db(preserve_preview=False)
         flash("success", tr("saved_ok"))
         st.rerun()
 
     bulk_status = b2.selectbox(tr("bulk_status"), ["Available", "Listed", "Sold"], label_visibility="collapsed")
     if b3.button(tr("apply_status")):
-        ids = [int(v) for v in edited["id"].tolist()]
-        db.bulk_set_status(ids, bulk_status)
-        flash("success", tr("saved_ok"))
-        st.rerun()
+        if "ID" in edited.columns:
+            ids = [int(v) for v in edited["ID"].tolist()]
+            db.bulk_set_status(ids, bulk_status)
+            st.session_state.inventory_pack_filter = pack_filter
+            pull_inventory_from_db(preserve_preview=False)
+            flash("success", tr("saved_ok"))
+            st.rerun()
 
     st.markdown('<div class="g4a-spacer"></div>', unsafe_allow_html=True)
     render_pricing_engine(frame, key_prefix="inv_prices", show_apply=False)
@@ -2588,6 +3072,63 @@ def render_locked_app() -> None:
     st.markdown(f"<style>{LUXURY_UI_CSS}</style>", unsafe_allow_html=True)
 
 
+def _resolve_boot_pack_file(source_hint: str = "") -> Path | None:
+    """Find the bundled CSV/TXT used for auto-seeding (by path, name, or first available)."""
+    paths = db.discover_default_pack_paths()
+    hint = (source_hint or "").strip()
+    if hint:
+        for path in paths:
+            if str(path) == hint or path.name == hint or path.name == Path(hint).name:
+                return path
+    return paths[0] if paths else None
+
+
+def _sync_boot_inventory_session(source_hint: str = "") -> None:
+    """Hydrate Streamlit session tables from the auto-seeded pack file layout."""
+    path = _resolve_boot_pack_file(source_hint)
+    pack_id = db.get_setting("boot_inventory_pack_id") or BOOT_PACK_ID
+
+    if path is None or not path.is_file():
+        pull_inventory_from_db(preserve_preview=False)
+        st.session_state.inventory_pack_filter = pack_id
+        return
+
+    raw = decode_upload_bytes(path.read_bytes())
+    parsed = parse_uploaded_pack(raw, path.name)
+    rows = parsed.get("rows") or []
+    display_df, field_labels = build_upload_inventory_df(
+        raw,
+        path.name,
+        rows,
+        display_df=parsed.get("display_df"),
+        field_labels=parsed.get("field_labels"),
+    )
+    pack_frame = db.inventory_frame(pack_id=pack_id)
+    st.session_state.inventory_field_labels = field_labels
+    st.session_state.inventory_snapshots = {pack_id: display_df.copy()}
+    st.session_state.inventory = attach_db_ids(display_df, pack_frame)
+    st.session_state.inventory_pack_filter = pack_id
+    pull_inventory_from_db(preserve_preview=False)
+
+
+def bootstrap_inventory_if_empty() -> int:
+    """Ensure cloud cold starts load bundled CSV stock into SQLite + session state."""
+    inserted, source_path = db.seed_inventory_if_empty()
+
+    if db.inventory_is_empty():
+        return 0
+
+    snapshots = st.session_state.get("inventory_snapshots") or {}
+    if inserted > 0 or not snapshots:
+        hint = source_path or db.get_setting("boot_inventory_source")
+        _sync_boot_inventory_session(hint)
+    else:
+        pull_inventory_from_db(preserve_preview=False)
+
+    st.session_state.pack_uploaded = True
+    return inserted or db.inventory_counts()["total"]
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Store & Growth Manager",
@@ -2599,6 +3140,7 @@ def main() -> None:
         st.session_state.authenticated = False
     init_auth_gate()
     db.init_db()
+    bootstrap_inventory_if_empty()
     sync_inventory_state()
     if "lang" not in st.session_state:
         st.session_state.lang = "en"

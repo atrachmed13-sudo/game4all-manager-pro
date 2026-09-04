@@ -6,14 +6,47 @@ License keys live in ``licenses``; workstation activation is persisted in ``sett
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-DB_PATH = Path(__file__).resolve().parent / "data" / "game4all_manager.db"
+_CACHED_DB_PATH: Path | None = None
+
+
+def resolve_db_path() -> Path:
+    """Pick a writable SQLite path — env override, app data dir, then OS temp (Streamlit Cloud)."""
+    global _CACHED_DB_PATH
+    if _CACHED_DB_PATH is not None:
+        return _CACHED_DB_PATH
+
+    override = os.environ.get("G4A_DB_PATH", "").strip()
+    if override:
+        _CACHED_DB_PATH = Path(override)
+        return _CACHED_DB_PATH
+
+    primary = Path(__file__).resolve().parent / "data" / "game4all_manager.db"
+    try:
+        primary.parent.mkdir(parents=True, exist_ok=True)
+        probe = sqlite3.connect(primary, timeout=5)
+        probe.execute("PRAGMA user_version")
+        probe.close()
+        _CACHED_DB_PATH = primary
+        return primary
+    except (OSError, sqlite3.Error):
+        fallback = Path(tempfile.gettempdir()) / "game4all_manager.db"
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        _CACHED_DB_PATH = fallback
+        return fallback
+
+
+# Backward-compatible alias used by ops/docs.
+DB_PATH = resolve_db_path()
 
 STATUSES = ("Available", "Listed", "Sold")
 
@@ -35,6 +68,9 @@ INVENTORY_COLUMNS = [
     "status",
     "login_email",
     "login_password",
+    "mail_password",
+    "old_password",
+    "secret_answer",
     "security_status",
     "sessions_revoked_at",
     "notes",
@@ -63,6 +99,17 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce CSV/pandas numeric cells for SQLite without NaN/Inf write failures."""
+    try:
+        number = float(value if value is not None and value != "" else default)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(number) or math.isinf(number):
+        return default
+    return number
+
+
 def _month_key(when: str | None = None) -> str:
     if when:
         return when[:7]
@@ -70,21 +117,101 @@ def _month_key(when: str | None = None) -> str:
 
 
 def get_connection() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=20)
+    path = resolve_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=20, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
-# Older builds of this app auto-seeded a demo pack (12 rows from
-# sample_data/batch_pack_example.csv) tagged with one of these pack_id spellings the very
-# first time the app ran. That auto-seeding code has been removed, but any database file
-# created before the removal still has those rows sitting on disk. This module now never
-# inserts sample/mock inventory itself; _purge_legacy_sample_inventory() only ever deletes
-# rows matching the old seeder's own tags so a pre-existing install ends up just as empty
-# as a brand new one.
+def storage_status() -> dict[str, Any]:
+    """Report where the active SQLite file lives and whether it already existed."""
+    path = resolve_db_path()
+    existed = path.is_file() and path.stat().st_size > 0
+    return {
+        "path": str(path),
+        "exists": existed,
+        "writable": os.access(path.parent, os.W_OK),
+        "ephemeral_hint": str(path).startswith(tempfile.gettempdir()),
+    }
+
+
+def inventory_is_empty() -> bool:
+    """True when the inventory table has zero rows (fresh deploy or after wipe)."""
+    try:
+        return inventory_counts()["total"] == 0
+    except sqlite3.Error:
+        return True
+
+
+BOOT_PACK_ID = "G4A-STARTER-PACK"
+
+
+def _auto_seed_enabled() -> bool:
+    flag = os.environ.get("G4A_AUTO_BOOTSTRAP", "1").strip().lower()
+    return flag not in {"0", "false", "no", "off"}
+
+
+def discover_default_pack_paths() -> list[Path]:
+    """Locate bundled CSV/TXT batch packs shipped with the repo (Streamlit Cloud safe)."""
+    root = Path(__file__).resolve().parent
+    candidates: list[Path] = [
+        root / "accounts.csv",
+        root / "sample_data" / "accounts.csv",
+        root / "sample_data" / "batch_pack_example.csv",
+        root / "sample_data" / "batch_pack_example.txt",
+    ]
+    sample_dir = root / "sample_data"
+    if sample_dir.is_dir():
+        candidates.extend(sorted(sample_dir.glob("accounts*.csv")))
+        candidates.extend(sorted(sample_dir.glob("*.csv")))
+        candidates.extend(sorted(sample_dir.glob("*.txt")))
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        key = str(path.resolve()).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def seed_inventory_if_empty(pack_id: str = BOOT_PACK_ID) -> tuple[int, str]:
+    """Auto-import a bundled pack when inventory is empty (cloud redeploy / first boot).
+
+    Returns ``(rows_inserted, source_path)``. Skips when the user explicitly cleared stock.
+    """
+    if not _auto_seed_enabled():
+        return 0, ""
+    if get_setting("inventory_user_cleared") == "1":
+        return 0, ""
+    if not inventory_is_empty():
+        return 0, ""
+
+    from parser import decode_upload_bytes, parse_batch_text
+
+    for path in discover_default_pack_paths():
+        try:
+            raw = decode_upload_bytes(path.read_bytes())
+        except OSError:
+            continue
+        parsed = parse_batch_text(raw, path.name)
+        rows = parsed.get("rows") or []
+        if not rows:
+            continue
+        inserted = insert_listings(rows, pack_id)
+        if inserted <= 0:
+            continue
+        set_setting("boot_inventory_source", path.name)
+        set_setting("boot_inventory_pack_id", pack_id)
+        set_setting("boot_inventory_rows", str(inserted))
+        return inserted, str(path)
+    return 0, ""
 _LEGACY_SAMPLE_PACK_PATTERNS = ("%SAMPLE-PACK%", "%SAMPLE_PACK%")
 
 
@@ -158,92 +285,117 @@ def _backfill_missing_features(conn: sqlite3.Connection) -> int:
     return updated
 
 
-def init_db() -> None:
-    with get_connection() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS inventory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pack_id TEXT NOT NULL DEFAULT '',
-                sku TEXT NOT NULL DEFAULT '',
-                title TEXT NOT NULL DEFAULT '',
-                game TEXT NOT NULL DEFAULT '',
-                rank TEXT NOT NULL DEFAULT '',
-                level TEXT NOT NULL DEFAULT '',
-                skins TEXT NOT NULL DEFAULT '',
-                emotes TEXT NOT NULL DEFAULT '',
-                extras TEXT NOT NULL DEFAULT '',
-                server TEXT NOT NULL DEFAULT '',
-                cost REAL NOT NULL DEFAULT 0,
-                list_price REAL NOT NULL DEFAULT 0,
-                platform TEXT NOT NULL DEFAULT 'G2G',
-                status TEXT NOT NULL DEFAULT 'Available',
-                login_email TEXT NOT NULL DEFAULT '',
-                login_password TEXT NOT NULL DEFAULT '',
-                security_status TEXT NOT NULL DEFAULT 'Unlocked',
-                sessions_revoked_at TEXT NOT NULL DEFAULT '',
-                notes TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
+def _apply_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inventory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pack_id TEXT NOT NULL DEFAULT '',
+            sku TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            game TEXT NOT NULL DEFAULT '',
+            rank TEXT NOT NULL DEFAULT '',
+            level TEXT NOT NULL DEFAULT '',
+            skins TEXT NOT NULL DEFAULT '',
+            emotes TEXT NOT NULL DEFAULT '',
+            extras TEXT NOT NULL DEFAULT '',
+            server TEXT NOT NULL DEFAULT '',
+            cost REAL NOT NULL DEFAULT 0,
+            list_price REAL NOT NULL DEFAULT 0,
+            platform TEXT NOT NULL DEFAULT 'G2G',
+            status TEXT NOT NULL DEFAULT 'Available',
+            login_email TEXT NOT NULL DEFAULT '',
+            login_password TEXT NOT NULL DEFAULT '',
+            mail_password TEXT NOT NULL DEFAULT '',
+            old_password TEXT NOT NULL DEFAULT '',
+            secret_answer TEXT NOT NULL DEFAULT '',
+            security_status TEXT NOT NULL DEFAULT 'Unlocked',
+            sessions_revoked_at TEXT NOT NULL DEFAULT '',
+            notes TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
-        if "login_email" not in existing:
-            conn.execute("ALTER TABLE inventory ADD COLUMN login_email TEXT NOT NULL DEFAULT ''")
-        if "login_password" not in existing:
-            conn.execute("ALTER TABLE inventory ADD COLUMN login_password TEXT NOT NULL DEFAULT ''")
-        if "security_status" not in existing:
-            conn.execute("ALTER TABLE inventory ADD COLUMN security_status TEXT NOT NULL DEFAULT 'Unlocked'")
-        if "sessions_revoked_at" not in existing:
-            conn.execute("ALTER TABLE inventory ADD COLUMN sessions_revoked_at TEXT NOT NULL DEFAULT ''")
-        _purge_legacy_sample_inventory(conn)
-        _backfill_missing_features(conn)
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sales (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                inventory_id INTEGER,
-                title TEXT NOT NULL DEFAULT '',
-                game TEXT NOT NULL DEFAULT '',
-                platform TEXT NOT NULL DEFAULT '',
-                cost REAL NOT NULL DEFAULT 0,
-                sold_price REAL NOT NULL DEFAULT 0,
-                commission_pct REAL NOT NULL DEFAULT 0,
-                extra_fees REAL NOT NULL DEFAULT 0,
-                net_profit REAL NOT NULL DEFAULT 0,
-                roi_pct REAL NOT NULL DEFAULT 0,
-                sold_at TEXT NOT NULL,
-                month_key TEXT NOT NULL,
-                FOREIGN KEY (inventory_id) REFERENCES inventory(id)
-            )
-            """
+        """
+    )
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(inventory)").fetchall()}
+    if "login_email" not in existing:
+        conn.execute("ALTER TABLE inventory ADD COLUMN login_email TEXT NOT NULL DEFAULT ''")
+    if "login_password" not in existing:
+        conn.execute("ALTER TABLE inventory ADD COLUMN login_password TEXT NOT NULL DEFAULT ''")
+    if "mail_password" not in existing:
+        conn.execute("ALTER TABLE inventory ADD COLUMN mail_password TEXT NOT NULL DEFAULT ''")
+    if "old_password" not in existing:
+        conn.execute("ALTER TABLE inventory ADD COLUMN old_password TEXT NOT NULL DEFAULT ''")
+    if "secret_answer" not in existing:
+        conn.execute("ALTER TABLE inventory ADD COLUMN secret_answer TEXT NOT NULL DEFAULT ''")
+    if "security_status" not in existing:
+        conn.execute("ALTER TABLE inventory ADD COLUMN security_status TEXT NOT NULL DEFAULT 'Unlocked'")
+    if "sessions_revoked_at" not in existing:
+        conn.execute("ALTER TABLE inventory ADD COLUMN sessions_revoked_at TEXT NOT NULL DEFAULT ''")
+    _purge_legacy_sample_inventory(conn)
+    _backfill_missing_features(conn)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inventory_id INTEGER,
+            title TEXT NOT NULL DEFAULT '',
+            game TEXT NOT NULL DEFAULT '',
+            platform TEXT NOT NULL DEFAULT '',
+            cost REAL NOT NULL DEFAULT 0,
+            sold_price REAL NOT NULL DEFAULT 0,
+            commission_pct REAL NOT NULL DEFAULT 0,
+            extra_fees REAL NOT NULL DEFAULT 0,
+            net_profit REAL NOT NULL DEFAULT 0,
+            roi_pct REAL NOT NULL DEFAULT 0,
+            sold_at TEXT NOT NULL,
+            month_key TEXT NOT NULL,
+            FOREIGN KEY (inventory_id) REFERENCES inventory(id)
         )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL DEFAULT ''
-            )
-            """
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT ''
         )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS licenses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                license_key TEXT NOT NULL UNIQUE,
-                key_hash TEXT NOT NULL DEFAULT '',
-                plan TEXT NOT NULL DEFAULT 'lifetime',
-                status TEXT NOT NULL DEFAULT 'active',
-                note TEXT NOT NULL DEFAULT '',
-                issued_at TEXT NOT NULL,
-                expires_at TEXT,
-                activated_at TEXT NOT NULL DEFAULT ''
-            )
-            """
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS licenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            license_key TEXT NOT NULL UNIQUE,
+            key_hash TEXT NOT NULL DEFAULT '',
+            plan TEXT NOT NULL DEFAULT 'lifetime',
+            status TEXT NOT NULL DEFAULT 'active',
+            note TEXT NOT NULL DEFAULT '',
+            issued_at TEXT NOT NULL,
+            expires_at TEXT,
+            activated_at TEXT NOT NULL DEFAULT ''
         )
-        conn.commit()
-    seed_demo_licenses()
+        """
+    )
+    conn.commit()
+
+
+def init_db(*, auto_seed: bool = True) -> None:
+    """Create or migrate all tables; safe on first launch and ephemeral Streamlit Cloud disks."""
+    global _CACHED_DB_PATH
+
+    def _bootstrap_schema() -> None:
+        with get_connection() as conn:
+            _apply_schema(conn)
+        seed_demo_licenses()
+
+    try:
+        _bootstrap_schema()
+    except (OSError, sqlite3.Error):
+        _CACHED_DB_PATH = Path(tempfile.gettempdir()) / "game4all_manager.db"
+        _bootstrap_schema()
+    if auto_seed:
+        seed_inventory_if_empty()
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -309,7 +461,7 @@ def list_delivery_accounts() -> list[dict[str, Any]]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT id, sku, title, game, platform, status, login_email, login_password
+            SELECT id, sku, title, game, platform, status, login_email, login_password, mail_password, old_password, secret_answer
             FROM inventory
             ORDER BY CASE status
                 WHEN 'Sold' THEN 0
@@ -328,25 +480,31 @@ def get_item(item_id: int) -> dict[str, Any] | None:
 
 
 def insert_listings(rows: list[dict[str, Any]], pack_id: str) -> int:
+    """Insert every parsed listing row for a pack in one committed transaction."""
+    if not rows:
+        return 0
     now = _utc_now()
     inserted = 0
     with get_connection() as conn:
         for raw in rows:
             sku = str(raw.get("sku") or "").strip() or f"G4A-{pack_id}-{inserted + 1:03d}"
             platform = str(raw.get("platform") or "G2G").strip() or "G2G"
-            cost = float(raw.get("cost") or 0)
-            list_price = float(raw.get("list_price") or 0)
+            cost = _safe_float(raw.get("cost"))
+            list_price = _safe_float(raw.get("list_price"))
             if list_price <= 0 and cost > 0:
                 from pricing import suggested_list_price
 
                 list_price = suggested_list_price(raw, platform)
+            status = str(raw.get("status") or "Available").strip() or "Available"
+            if status not in STATUSES:
+                status = "Available"
             conn.execute(
                 """
                 INSERT INTO inventory (
                     pack_id, sku, title, game, rank, level, skins, emotes, extras,
                     server, cost, list_price, platform, status, login_email, login_password,
-                    notes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    mail_password, old_password, secret_answer, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pack_id,
@@ -362,9 +520,12 @@ def insert_listings(rows: list[dict[str, Any]], pack_id: str) -> int:
                     cost,
                     list_price,
                     platform,
-                    str(raw.get("status") or "Available").strip() or "Available",
+                    status,
                     str(raw.get("login_email") or "").strip(),
                     str(raw.get("login_password") or "").strip(),
+                    str(raw.get("mail_password") or "").strip(),
+                    str(raw.get("old_password") or "").strip(),
+                    str(raw.get("secret_answer") or "").strip(),
                     str(raw.get("notes") or "").strip(),
                     now,
                     now,
@@ -394,6 +555,9 @@ def update_inventory_row(item_id: int, fields: dict[str, Any]) -> None:
         "notes",
         "login_email",
         "login_password",
+        "mail_password",
+        "old_password",
+        "secret_answer",
     }
     assignments = []
     values: list[Any] = []
